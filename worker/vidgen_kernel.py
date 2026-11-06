@@ -121,44 +121,57 @@ def load_pipeline(gpu: str):
     import torch
     from diffusers import Kandinsky6TI2VAPipeline
 
-    repo = ENV.get("KANDINSKY_REPO", "kandinskylab/Kandinsky-6.0-Lite-distill-5s-Diffusers")
-    print(f"[{gpu}] downloading/loading {repo} (bf16, exact)…", flush=True)
-    pipe = Kandinsky6TI2VAPipeline.from_pretrained(
-        repo, torch_dtype=torch.bfloat16, variant="fp16" if _has_fp16(repo) else None,
-    )
-    # Turing casting: DiT + text encoders → fp16 (compute), decoders → fp32 (safe)
-    for comp in ("transformer", "text_encoder", "text_encoder_2"):
-        m = getattr(pipe, comp, None)
-        if m is not None:
-            m.to(torch.float16)
-    for comp in ("vae", "audio_vae", "vocoder"):
-        m = getattr(pipe, comp, None)
-        if m is not None:
-            m.to(torch.float32)
-    # memory ladder: model offload → (verify residency) → sequential → last resort all-GPU.
-    # v1 lesson: a silently-ignored offload left 14.2 GiB resident and OOM'd the i2v path.
-    strategy = "all-gpu"
-    for fn in ("enable_model_cpu_offload", "enable_sequential_cpu_offload"):
-        try:
-            getattr(pipe, fn)()
-            torch.cuda.synchronize()
-            resident = torch.cuda.memory_allocated() / 2**30
-            print(f"[{gpu}] {fn}: resident after apply = {resident:.2f} GiB", flush=True)
-            if resident < 4.0:
-                strategy = fn
-                break
-            print(f"[{gpu}] {fn} ignored by pipeline (still resident) — escalating", flush=True)
-        except Exception as e:
-            print(f"[{gpu}] {fn} unavailable: {type(e).__name__}: {e}", flush=True)
-    if strategy == "all-gpu":
-        pipe.to("cuda")
-    print(f"[{gpu}] memory strategy: {strategy}", flush=True)
+    # SERIALIZE the 35 GB download/load across cards: two concurrent
+    # from_pretrained calls peaked ~2x Kaggle RAM and the OOM killer
+    # silently reaped the second process (v1 post-mortem). The lock makes
+    # card 1 wait, then load from the warm HF cache in ~2 min.
+    import fcntl
+    lock_path = "/tmp/vidgen_model_load.lock"
+    lock_f = open(lock_path, "w")
+    print(f"[{gpu}] waiting for model-load lock…", flush=True)
+    fcntl.flock(lock_f, fcntl.LOCK_EX)
     try:
-        pipe.vae.enable_tiling()  # decode headroom on 16 GB
-    except Exception:
-        pass
-    print(f"[{gpu}] pipeline ready", flush=True)
-    return pipe
+        repo = ENV.get("KANDINSKY_REPO", "kandinskylab/Kandinsky-6.0-Lite-distill-5s-Diffusers")
+        print(f"[{gpu}] downloading/loading {repo} (bf16, exact)…", flush=True)
+        pipe = Kandinsky6TI2VAPipeline.from_pretrained(
+            repo, torch_dtype=torch.bfloat16, variant="fp16" if _has_fp16(repo) else None,
+            low_cpu_mem_usage=True,  # stream shards; no full-state-dict RAM spike
+        )
+        # Turing casting: DiT + text encoders → fp16 (compute), decoders → fp32 (safe)
+        for comp in ("transformer", "text_encoder", "text_encoder_2"):
+            m = getattr(pipe, comp, None)
+            if m is not None:
+                m.to(torch.float16)
+        for comp in ("vae", "audio_vae", "vocoder"):
+            m = getattr(pipe, comp, None)
+            if m is not None:
+                m.to(torch.float32)
+        # memory ladder: model offload → (verify residency) → sequential → last resort all-GPU.
+        # v1 lesson: a silently-ignored offload left 14.2 GiB resident and OOM'd the i2v path.
+        strategy = "all-gpu"
+        for fn in ("enable_model_cpu_offload", "enable_sequential_cpu_offload"):
+            try:
+                getattr(pipe, fn)()
+                torch.cuda.synchronize()
+                resident = torch.cuda.memory_allocated() / 2**30
+                print(f"[{gpu}] {fn}: resident after apply = {resident:.2f} GiB", flush=True)
+                if resident < 4.0:
+                    strategy = fn
+                    break
+                print(f"[{gpu}] {fn} ignored by pipeline (still resident) — escalating", flush=True)
+            except Exception as e:
+                print(f"[{gpu}] {fn} unavailable: {type(e).__name__}: {e}", flush=True)
+        if strategy == "all-gpu":
+            pipe.to("cuda")
+        print(f"[{gpu}] memory strategy: {strategy}", flush=True)
+        try:
+            pipe.vae.enable_tiling()  # decode headroom on 16 GB
+        except Exception:
+            pass
+        return pipe
+    finally:
+        fcntl.flock(lock_f, fcntl.LOCK_UN)  # release on success AND failure
+        print(f"[{gpu}] model-load lock released", flush=True)
 
 
 def _audio_to_np(audio, ):
