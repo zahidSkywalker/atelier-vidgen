@@ -103,6 +103,152 @@ DURATION_S = 5
 FRAMES = DURATION_S * FPS + 1  # 121 (8n+1)
 ASPECTS = {"landscape": (864, 480), "portrait": (480, 864)}
 
+TE_LOADED_NAME = TE_NAME  # switched to the fp8q variant after boot conversion
+
+
+# Regex over the transformer-body Linear weights (the RAM bulk). Everything
+# else — embeddings, norms, biases, vision/audio towers, hf_asset blobs —
+# stays fp16/passthrough on purpose: MixedPrecisionOps only quantizes Linear.
+QUANT_LIN_RE = re.compile(
+    r"^model\.layers\.\d+\.(?:self_attn\.(?:q_proj|k_proj|v_proj|o_proj)"
+    r"|mlp\.(?:gate_proj|up_proj|down_proj)"
+    r"|per_layer_input_gate|per_layer_projection)\.weight$"
+    r"|^model\.per_layer_model_projection\.weight$")
+
+
+def convert_te_fp8() -> str:
+    """bf16 TE is 24.5 GiB; the fp16 recast (v18) still died at the encode
+    forward — 24.5 GiB + torch runtime sits exactly on the box's cgroup edge
+    and swapon is not permitted on Kaggle. Fix: convert the transformer-body
+    Linears to ComfyUI's MixedPrecisionOps format — fp8_e4m3fn storage +
+    per-tensor weight_scale + per-layer comfy_quant metadata → TE resident
+    drops to ~half, weights dequant per-op in fp16 (Turing-safe). Streaming
+    two-pass writer in a throwaway subprocess: peak RAM < 3 GiB and the
+    glibc arenas die with the process (v17 lesson)."""
+    global TE_LOADED_NAME
+    src = f"{COMFY_DIR}/models/text_encoders/{TE_NAME}"
+    dst = src.replace(".safetensors", "-fp8q.safetensors")
+    if os.path.exists(dst) and os.path.getsize(dst) > 1_000_000_000:
+        TE_LOADED_NAME = os.path.basename(dst)
+        log(f"TE fp8q ready ({os.path.getsize(dst) / 2**30:.1f} GB)")
+        return dst
+    log("converting gemma TE bf16 → fp8q (ComfyUI mixed-ops format)…")
+    conv_script = f"{BASE}/convert_te_fp8.py"
+    with open(conv_script, "w") as f:
+        f.write(CONVERT_TE_FP8_SRC
+                .replace("__SRC__", src)
+                .replace("__DST__", dst)
+                .replace("__QRE__", QUANT_LIN_RE.pattern))
+    r = subprocess.run([sys.executable, conv_script], capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(dst):
+        log(f"fp8q conversion failed rc={r.returncode}: {r.stdout[-300:]} {r.stderr[-600:]}")
+        raise SystemExit("TE fp8q conversion failed")
+    # the bf16 original is dead weight on the ephemeral disk — drop it
+    try:
+        os.remove(src)
+    except Exception:
+        pass
+    TE_LOADED_NAME = os.path.basename(dst)
+    log(f"TE fp8q written ({os.path.getsize(dst) / 2**30:.1f} GB), bf16 removed")
+    return dst
+
+
+CONVERT_TE_FP8_SRC = r'''
+import json, os, re, struct
+import numpy as np
+import torch
+from safetensors import safe_open
+
+SRC = "__SRC__"
+DST = "__DST__"
+QRE = re.compile(r"__QRE__")
+QJSON = json.dumps({"format": "float8_e4m3fn"}).encode("utf-8")
+DT_SIZE = {"U8": 1, "I8": 1, "BOOL": 1, "F8_E4M3": 1, "F16": 2, "BF16": 2,
+           "F32": 4, "F64": 8, "I32": 4, "I16": 2, "U16": 2, "I64": 8}
+
+with open(SRC, "rb") as f:
+    n = struct.unpack("<Q", f.read(8))[0]
+    hdr = json.loads(f.read(n))
+
+# entries in original file order: (out_name, out_dtype, shape, src_key)
+entries = []
+for k, meta in sorted(((k, v) for k, v in hdr.items() if k != "__metadata__"),
+                      key=lambda kv: kv[1]["data_offsets"][0]):
+    dt, shape = meta["dtype"], list(meta["shape"])
+    if dt in ("BF16", "F32", "F16") and len(shape) == 2 and QRE.match(k):
+        base = k[: -len("weight")]
+        entries.append((k, "F8_E4M3", shape, k))
+        entries.append((base + "weight_scale", "F32", [], k))
+        entries.append((base + "comfy_quant", "U8", [len(QJSON)], k))
+    elif dt in ("BF16", "F32"):
+        entries.append((k, "F16", shape, k))
+    else:
+        entries.append((k, dt, shape, k))
+
+def numel(shape):
+    n = 1
+    for d in shape:
+        n *= int(d)
+    return int(n)
+
+# pass 1: compute data section layout (header is byte-size-stable upfront)
+off, offsets = 0, {}
+for name, dt, shape, _ in entries:
+    nbytes = numel(shape) * DT_SIZE[dt]
+    offsets[name] = (off, off + nbytes)
+    off += nbytes
+data_len = off
+
+hdr_out = {"__metadata__": {"format": "pt"}}
+for name, dt, shape, _ in entries:
+    hdr_out[name] = {"dtype": dt, "shape": shape,
+                     "data_offsets": list(offsets[name])}
+hjson = json.dumps(hdr_out, separators=(",", ":")).encode("utf-8")
+pad = (-(8 + len(hjson))) % 8
+hjson += b" " * pad
+
+# pass 2: stream tensor payloads in entry order
+pend_scale = None
+with open(DST, "wb") as out:
+    out.write(struct.pack("<Q", len(hjson)))
+    out.write(hjson)
+    with safe_open(SRC, framework="pt", device="cpu") as f:
+        for name, dt, shape, skey in entries:
+            if dt == "U8" and name.endswith("comfy_quant"):
+                out.write(QJSON)
+            elif dt == "F8_E4M3":
+                sl = f.get_slice(skey)
+                rows, row_elems = shape[0], max(1, numel(shape[1:]))
+                chunk = max(1, (64 << 20) // (row_elems * 4))
+                amax = 0.0
+                for s in range(0, rows, chunk):
+                    amax = max(amax, sl[s: s + chunk].to(torch.float32).abs().amax().item())
+                scale = max(amax / 448.0, 1e-12)
+                pend_scale = scale
+                for s in range(0, rows, chunk):
+                    t = sl[s: s + chunk].to(torch.float32)
+                    q = (t / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+                    out.write(q.contiguous().view(torch.uint8).numpy().tobytes())
+            elif dt == "F32" and name.endswith("weight_scale"):
+                out.write(np.float32(pend_scale).tobytes())
+                pend_scale = None
+            elif dt == "F16":
+                sl = f.get_slice(skey)
+                rows, row_elems = shape[0], max(1, numel(shape[1:]))
+                chunk = max(1, (64 << 20) // (row_elems * 2))
+                for s in range(0, rows, chunk):
+                    t = sl[s: s + chunk].to(torch.float16)
+                    out.write(t.contiguous().numpy().tobytes())
+            else:
+                out.write(f.get_tensor(skey).contiguous().numpy().tobytes())
+
+size = 8 + len(hjson) + data_len
+assert os.path.getsize(DST) == size, f"size mismatch {os.path.getsize(DST)} != {size}"
+nq = sum(1 for e in entries if e[1] == "F8_E4M3")
+print(f"fp8q ok: {len(entries)} tensors ({nq} quantized), {size / 2**30:.2f} GB", flush=True)
+'''
+
+
 
 def log(msg: str) -> None:
     print(f"[vidgen {time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -163,15 +309,45 @@ def setup_comfy() -> None:
 COMFY_PROC = None
 
 
+def setup_swap() -> None:
+    """Swapon is not permitted on Kaggle containers (v18 probe) — this is a
+    no-op kept so the boot log records the attempt. The real RAM fix is the
+    fp8q TE conversion."""
+    try:
+        sh("fallocate -l 12G /kaggle/temp/swapfile && chmod 600 /kaggle/temp/swapfile && "
+           "mkswap -q /kaggle/temp/swapfile && swapon /kaggle/temp/swapfile 2>&1 || true")
+        sh("free -m | tail -1 || true")
+    except Exception as e:
+        log(f"swap setup skipped: {e}")
+
+
+def probe_te_keys() -> None:
+    """Log the TE file's tensor names — informs a future GGUF-TE conversion
+    (tokenizer asset tensors, proj head names, state-dict layout)."""
+    try:
+        from safetensors import safe_open
+        p = f"{COMFY_DIR}/models/text_encoders/{TE_LOADED_NAME}"
+        with safe_open(p, framework="pt", device="cpu") as f:
+            keys = list(f.keys())
+        log(f"TE tensors: {len(keys)}; sample: {keys[:6]}")
+        tok = [k for k in keys if "token" in k.lower()]
+        log(f"TE tokenizer-ish keys: {tok[:8]}")
+    except Exception as e:
+        log(f"TE probe failed: {e}")
+
+
 def start_comfy() -> None:
     global COMFY_PROC
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = "0"
     env.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
     logfile = open(f"{BASE}/comfyui.log", "a")
+    # --disable-dynamic-vram + --cache-none: the fp8q TE (~half of 24.5 GiB)
+    # full-loads to RAM, cache-none frees it before the 13 GiB GGUF DiT loads
+    # to card 0. Never both at once, nothing staged to disk.
     cmd = [sys.executable, "main.py",
            "--port", "8188", "--listen", "127.0.0.1",
-           "--lowvram", "--disable-dynamic-vram", "--force-fp16",
+           "--lowvram", "--disable-dynamic-vram", "--cache-none", "--force-fp16",
            "--preview-method", "none", "--disable-auto-launch"]
     log(f"launching ComfyUI: {' '.join(cmd[2:])}")
     COMFY_PROC = subprocess.Popen(cmd, cwd=COMFY_DIR, env=env,
@@ -226,7 +402,7 @@ def build_graph(mode: str, prompt: str, width: int, height: int, seed: int,
 
     C = lambda nid, slot=0: [nid, slot]
 
-    clip = node("CLIPLoader", widgets=[("clip_name", TE_NAME), ("type", "ltxv"), ("device", "default")])
+    clip = node("CLIPLoader", widgets=[("clip_name", TE_LOADED_NAME), ("type", "ltxv"), ("device", "default")])
     pos = node("CLIPTextEncode", inputs={"clip": C(clip)}, widgets=[("text", prompt)])
     neg = node("CLIPTextEncode", inputs={"clip": C(clip)}, widgets=[("text", NEGATIVE)])
     cond = node("LTXVConditioning", inputs={"positive": C(pos), "negative": C(neg)},
@@ -237,25 +413,29 @@ def build_graph(mode: str, prompt: str, width: int, height: int, seed: int,
 
     img_src = None
     if mode == "i2v":
+        # ref image is pre-scaled in render_job (longer side → 1536, lanczos);
+        # ResizeImageMaskNode's DynamicCombo API validation is brittle, so the
+        # graph goes LoadImage → LTXVPreprocess directly.
         load = node("LoadImage", widgets=[("image", ref_file)])
-        rsz = node("ResizeImageMaskNode", inputs={"input": C(load)},
-                   widgets=[("resize_type", "scale longer dimension"), ("longer_size", 1536),
-                            ("scale_method", "lanczos")])
-        img_src = node("LTXVPreprocess", inputs={"image": C(rsz)}, widgets=[("img_compression", 18)])
+        img_src = node("LTXVPreprocess", inputs={"image": C(load)}, widgets=[("img_compression", 18)])
 
     # stage 1: base pass at W/2 x H/2 (single-stage fallback: full W x H)
     bw, bh = (width // 2, height // 2) if stage == "two" else (width, height)
     vlat = node("EmptyLTXVLatentVideo", widgets=[("width", bw), ("height", bh),
                                                  ("length", FRAMES), ("batch_size", 1)])
-    alat = node("LTXVEmptyLatentAudio", inputs={"vae": C(avae)},
+    alat = node("LTXVEmptyLatentAudio", inputs={"audio_vae": C(avae)},
                 widgets=[("frames_number", FRAMES), ("frame_rate", FPS), ("batch_size", 1)])
     av = node("LTXVConcatAVLatent", inputs={"video_latent": C(vlat), "audio_latent": C(alat)})
 
     latent_in = C(av)
     if mode == "i2v":
-        pin = node("LTXVImgToVideoInplace", inputs={"vae": C(vvae), "image": C(img_src), "latent": C(av)},
+        # template wiring: the pin node takes the plain VIDEO latent (not the
+        # packed AV latent — that one is a NestedTensor and has no .clone()),
+        # and the concat consumes the pinned output.
+        pin = node("LTXVImgToVideoInplace", inputs={"vae": C(vvae), "image": C(img_src), "latent": C(vlat)},
                    widgets=[("strength", 0.7), ("bypass", False)])
-        latent_in = C(pin)
+        av = node("LTXVConcatAVLatent", inputs={"video_latent": C(pin), "audio_latent": C(alat)})
+        latent_in = C(av)
 
     noise1 = node("RandomNoise", widgets=[("noise_seed", int(seed)), ("control", "randomize")])
     ks1 = node("KSamplerSelect", widgets=[("sampler_name", "euler_ancestral")])
@@ -341,7 +521,27 @@ def comfy_progress() -> int:
         return 0
 
 
-def run_workflow(gf, pinger: Pinger, timeout_min: int = 90) -> str:
+def debug_trail(ex: Exchange, jid: str, phase: str, extra: str = "") -> None:
+    """Best-effort phase + ComfyUI log tail into R2 so a thrashed box is
+    debuggable from the outside."""
+    try:
+        tail = ""
+        try:
+            sz = os.path.getsize(f"{BASE}/comfyui.log")
+            with open(f"{BASE}/comfyui.log", "r", errors="ignore") as f:
+                f.seek(max(0, sz - 2500))
+                tail = f.read()
+        except Exception:
+            pass
+        ex.put_json(f"debug/{jid}.json", {
+            "id": jid, "phase": phase, "extra": extra[:400],
+            "comfy_tail": tail[-2200:], "at": time.time(),
+        })
+    except Exception:
+        pass
+
+
+def run_workflow(gf, pinger: Pinger, ex: Exchange, jid: str, timeout_min: int = 90) -> str:
     """POST /prompt, poll /history until the SaveVideo output exists. Returns mp4 path."""
     resp = api_post("/prompt", {"prompt": gf["prompt"]})
     pid = resp["prompt_id"]
@@ -350,6 +550,13 @@ def run_workflow(gf, pinger: Pinger, timeout_min: int = 90) -> str:
     last_pct = -1
     while time.time() < deadline:
         time.sleep(8)
+        # inline heartbeat: don't depend solely on the pinger thread
+        try:
+            ex.heartbeat(jid, "RENDERING", gpu=pinger.gpu,
+                         progress=max(pinger.progress, 15 + int(comfy_progress() * 0.75)),
+                         elapsed_s=time.time() - T0)
+        except Exception:
+            pass
         try:
             with urllib.request.urlopen(f"{API}/history/{pid}", timeout=30) as r:
                 hist = json.loads(r.read())
@@ -387,6 +594,30 @@ def run_workflow(gf, pinger: Pinger, timeout_min: int = 90) -> str:
     raise RuntimeError(f"render timed out after {timeout_min} min")
 
 
+def oom_evidence() -> str:
+    """One-line OOM forensics for the fail status: kernel OOM-killer lines
+    (when dmesg is readable) + RAM headroom, so a 'died mid-render' is
+    diagnosable from the panel instead of churning blind sessions."""
+    bits = []
+    try:
+        d = subprocess.run(
+            "dmesg 2>/dev/null | grep -iE 'oom|killed process' | tail -2",
+            shell=True, capture_output=True, text=True, executable="/bin/bash", timeout=10)
+        if d.stdout.strip():
+            bits.append("dmesg: " + d.stdout.strip().splitlines()[-1][:160])
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith(("MemTotal", "MemAvailable")):
+                    p = line.split()
+                    bits.append(f"{p[0]}={int(p[1]) / 2**20:.1f}G")
+    except Exception:
+        pass
+    return (" | ".join(bits))[:200]
+
+
 def make_thumb(video_path: str, thumb_path: str) -> None:
     subprocess.run(f'ffmpeg -y -v error -ss 2 -i "{video_path}" -frames:v 1 -q:v 3 "{thumb_path}"',
                    shell=True, check=True, executable="/bin/bash")
@@ -403,20 +634,31 @@ def render_job(ex: Exchange, jid: str, spec: dict, gpu: str) -> None:
 
     ref_file = ""
     if mode == "i2v":
-        ref_path = f"{BASE}/ref_{jid}.jpg"
-        got = ex.get_file(f"{ex.prefix}/jobs/{jid}/ref.jpg", ref_path) or \
-              ex.get_file(f"{ex.prefix}/jobs/{jid}/ref.png", ref_path)
-        if not got or os.path.getsize(ref_path) < 1000:
+        os.makedirs(f"{COMFY_DIR}/input", exist_ok=True)
+        raw_path = f"{BASE}/ref_{jid}.raw"
+        got = ex.get_file(f"{ex.prefix}/jobs/{jid}/ref.jpg", raw_path) or \
+              ex.get_file(f"{ex.prefix}/jobs/{jid}/ref.png", raw_path)
+        if not got or os.path.getsize(raw_path) < 1000:
             raise RuntimeError("i2v reference image missing in the exchange")
-        ref_file = os.path.basename(ref_path)
+        # pre-scale here (template used ResizeImageMaskNode: longer side → 1536, lanczos)
+        from PIL import Image
+        im = Image.open(raw_path).convert("RGB")
+        w, h = im.size
+        k = 1536 / max(w, h)
+        if k < 1.0:
+            im = im.resize((max(1, round(w * k)), max(1, round(h * k))), Image.LANCZOS)
+        ref_file = f"ref_{jid}.jpg"
+        im.save(f"{COMFY_DIR}/input/{ref_file}", quality=95)
+        os.remove(raw_path)
 
     log(f"rendering {jid[:10]} mode={mode} {width}x{height} seed={seed}")
     pinger = Pinger(ex, jid, gpu)
     t0 = time.time()
     try:
+        debug_trail(ex, jid, "submitting")
         gf = build_graph(mode, prompt, width, height, seed, ref_file, jid, stage="two")
         try:
-            video = run_workflow(gf, pinger)
+            video = run_workflow(gf, pinger, ex, jid)
             stage_used = "two"
         except RuntimeError as e:
             if "out of memory" not in str(e).lower():
@@ -424,12 +666,31 @@ def render_job(ex: Exchange, jid: str, spec: dict, gpu: str) -> None:
             log(f"two-stage OOM → single-stage fallback ({str(e)[:120]})")
             ex.heartbeat(jid, "RENDERING", gpu=gpu, progress=12, elapsed_s=time.time() - T0)
             gf = build_graph(mode, prompt, width, height, seed, ref_file, jid, stage="one")
-            video = run_workflow(gf, pinger)
+            video = run_workflow(gf, pinger, ex, jid)
             stage_used = "one"
-        thumb = video.replace("/output/", "/output/thumb_")
-        make_thumb(video, thumb)
-        ex.publish_result(jid, video, thumb, gpu, time.time() - t0)
+        # thumb MUST end in .jpg — ffmpeg picks the container from the output
+        # extension, so a .mp4 thumb name produced mp4 bytes inside thumb.jpg
+        # (v21 bug: every poster in the gallery was an undecodable "image")
+        thumb = os.path.join(os.path.dirname(video),
+                             "thumb_" + os.path.basename(video).rsplit(".", 1)[0] + ".jpg")
+        try:
+            make_thumb(video, thumb)
+        except Exception as te:
+            log(f"thumb failed, publishing without poster: {str(te)[:150]}")
+            thumb = ""
+        debug_trail(ex, jid, "publishing")
+        if thumb and os.path.exists(thumb):
+            ex.publish_result(jid, video, thumb, gpu, time.time() - t0)
+        else:
+            # video alone is the deliverable — never lose a rendered clip to a
+            # poster-frame hiccup (v20 lost both smoke renders to a bad
+            # thumb path that pointed into a nonexistent subdirectory)
+            ex.put_file(f"{ex.prefix}/results/{jid}/video.mp4", video)
+            ex.heartbeat(jid, "DONE", gpu=gpu, progress=100, elapsed_s=time.time() - t0)
         log(f"DONE {jid[:10]} in {int(time.time() - t0)} s (stage={stage_used})")
+    except Exception as e:
+        debug_trail(ex, jid, "failed", str(e))
+        raise
     finally:
         pinger.stop()
 
@@ -439,6 +700,9 @@ def render_job(ex: Exchange, jid: str, spec: dict, gpu: str) -> None:
 def main() -> None:
     install_deps()
     setup_comfy()
+    setup_swap()
+    convert_te_fp8()
+    probe_te_keys()
     start_comfy()
 
     try:
@@ -471,9 +735,31 @@ def main() -> None:
     except Exception:
         pass
     log("worker loop up — LTX-2.5 22B distilled UD-Q4_K_XL, two-stage pipeline")
+    MY_BOOT_TS = time.time()
+    try:
+        ex_boot = Exchange()
+        ex_boot.put_json("boot_marker.json", {"at": MY_BOOT_TS, "pid": os.getpid()})
+    except Exception:
+        MY_BOOT_TS = 0
+
+    def superseded(ex_: Exchange) -> bool:
+        """True when a NEWER session has announced itself — stale sessions must
+        leave the exchange immediately instead of sniping fresh jobs with old
+        code (the v12–v15 race)."""
+        if not MY_BOOT_TS:
+            return False
+        try:
+            m = ex_.get_json("boot_marker.json")
+            return bool(m) and m.get("at", 0) > MY_BOOT_TS + 20
+        except Exception:
+            return False
 
     last_busy = time.time()
+    fail_sig, fail_n = "", 0
     while time.time() - T0 < MAX_SESSION_MIN * 60:
+        if superseded(ex):
+            log("newer session announced itself — this worker stands down")
+            return
         try:
             jobs = ex.pending_jobs()
         except Exception as e:
@@ -488,6 +774,9 @@ def main() -> None:
             continue
         last_busy = time.time()
         for spec in jobs:
+            if superseded(ex):
+                log("newer session announced itself — not claiming further jobs")
+                return
             jid = spec.get("id", "")
             key = spec.get("_key", "")
             claimed = ex.claim(jid, key)
@@ -495,12 +784,25 @@ def main() -> None:
                 continue
             try:
                 render_job(ex, jid, claimed, gpu)
+                fail_sig, fail_n = "", 0
             except Exception as e:
-                log(f"FAILED {jid[:10]}: {str(e)[:300]}")
+                msg = str(e)[:400]
+                oom = oom_evidence()
+                full = (msg + (" || " + oom if oom else ""))[:480]
+                log(f"FAILED {jid[:10]}: {full}")
                 try:
-                    ex.fail(jid, str(e)[:400], gpu=gpu)
+                    ex.fail(jid, full, gpu=gpu)
                 except Exception:
                     pass
+                sig = msg[:80]
+                fail_n = fail_n + 1 if sig == fail_sig else 1
+                fail_sig = sig
+                if fail_n >= 3:
+                    debug_trail(ex, jid, "circuit-break",
+                                f"3 consecutive same-signature failures: {sig}")
+                    log("circuit breaker: 3 consecutive same-signature failures "
+                        "— exiting instead of churning the queue")
+                    raise SystemExit(3)
             last_busy = time.time()
 
     log("session cap reached — exiting")

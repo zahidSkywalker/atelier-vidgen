@@ -1,15 +1,14 @@
 {
   "id": "xion678/atelier-vidgen-worker",
   "title": "Atelier VidGen Worker",
-  "code_file": "vidgen_kernel.py",
+  "code_file": "atelier-vidgen-worker.py",
   "language": "python",
   "kernel_type": "script",
-  "is_private": "true",
-  "enable_gpu": "true",
-  "enable_internet": "true",
-  "dataset_sources": [
-    "xion678/vidgen-config"
-  ],
-  "competition_sources": [],
-  "kernel_sources": []
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": ["xion678/vidgen-config"],
+  "kernel_sources": [],
+  "model_sources": []
 }

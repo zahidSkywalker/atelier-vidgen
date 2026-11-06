@@ -1,5 +1,7 @@
-# Atelier VidGen edge worker — static panel + R2 exchange + Kaggle WAKE switch.
-# Deploy: CLOUDFLARE_API_TOKEN=$(...) CLOUDFLARE_ACCOUNT_ID=$(...) npx wrangler deploy
+# Atelier VidGen edge worker — static panel + PIN gate + R2 exchange + Kaggle wake.
+# Deploy: CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... npx wrangler deploy
+# (KAGGLE_API_TOKEN worker secret persists across deploys.)
+
 name = "vidgen"
 main = "worker.js"
 compatibility_date = "2026-01-15"
@@ -9,7 +11,7 @@ directory = "./panel"
 binding = "ASSETS"          # asset requests never invoke the Worker (0 CPU, free)
 
 [[r2_buckets]]
-binding = "CTRL"            # the shared exchange: vidgen/jobs|status|results + boot/*
+binding = "CTRL"            # control plane: jobs/status/results/boot (the only shared truth)
 bucket_name = "imagegen-ctrl"
 
 [observability]

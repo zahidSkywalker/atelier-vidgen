@@ -1,7 +1,3 @@
-node_modules/
-.next/
-*.db
-*.env
-__pycache__/
+panel/current_*
+__pycache__
 *.pyc
-.DS_Store

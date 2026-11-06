@@ -1,19 +1,13 @@
-/**
- * Atelier VidGen edge worker — one stable URL, four jobs:
- *   1. serve the panel from Static Assets (0 CPU for asset hits)
- *   2. /api/jobs POST   → write job spec (+ i2v ref) straight into the R2 exchange
- *      /api/jobs GET    → queue + gallery state (status/*.json + edge index)
- *   3. /api/media/*     → mp4 / thumb streamed from the R2 binding
- *   4. /api/wake        → push the GPU worker kernel to Kaggle (SaveKernel API),
- *                         boot code + metadata read from R2 vidgen/boot/*
- *
- * Every /api/* call (except /api/knock) requires the panel PIN — sent as
- * header X-Vidgen-Pin, cookie vidgen_pin, or ?pin= (media tags can't set headers).
- * Layout mirrors the worker exchange protocol: vidgen/jobs|status|results.
- */
+// Atelier VidGen — edge worker.
+// Static panel (ASSETS) + PIN gate + R2 exchange reads + Kaggle SaveKernel wake.
+// Engine: LTX-2.5 22B distilled (Unsloth UD-Q4_K_XL GGUF) on Kaggle 2×T4, ComfyUI-GGUF.
 
 const PIN_COOKIE = "vidgen_pin";
 const PREFIX = "vidgen";
+const ENGINE = "LTX-2.5 22B distilled · UD-Q4_K_XL";
+const KAGGLE_SAVE_URL = "https://api.kaggle.com/v1/kernels.KernelsApiService/SaveKernel";
+const WAKE_COOLDOWN_S = 600;   // treat a wake as "active" for 10 min
+const MEDIA_VER = 2;           // bump when result assets are regenerated — busts browser cache
 
 const json = (data, status = 200, extra = {}) =>
   new Response(JSON.stringify(data), {
@@ -24,9 +18,7 @@ const json = (data, status = 200, extra = {}) =>
 function timingSafeEqual(a, b) {
   const len = Math.max(a.length, b.length);
   let diff = a.length === b.length ? 0 : 1;
-  for (let i = 0; i < len; i++) {
-    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
-  }
+  for (let i = 0; i < len; i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
   return diff === 0;
 }
 
@@ -36,7 +28,7 @@ async function getState(env) {
   try { return await obj.json(); } catch { return {}; }
 }
 
-async function getPin(request, url) {
+function getPin(request, url) {
   let pin = request.headers.get("X-Vidgen-Pin") || "";
   if (!pin) {
     const cookie = request.headers.get("Cookie") || "";
@@ -51,29 +43,28 @@ async function requirePin(request, env, url) {
   const state = await getState(env);
   const expected = state.panel_pin || "";
   if (!expected) return { state, err: json({ error: "not provisioned — state.json has no panel_pin" }, 503) };
-  const got = await getPin(request, url);
+  const got = getPin(request, url);
   if (!timingSafeEqual(got, expected)) return { state, err: json({ error: "bad PIN" }, 401) };
   return { state, err: null };
 }
 
-/* ---------- exchange helpers ---------- */
-
 async function listStatuses(env, limit = 80) {
   const list = await env.CTRL.list({ prefix: `${PREFIX}/status/`, limit: 1000 });
-  const newest = list.objects
-    .filter((o) => o.key.endsWith(".json"))
-    .sort((a, b) => b.uploaded - a.uploaded)
-    .slice(0, limit);
+  const newest = list.objects.filter((o) => o.key.endsWith(".json")).sort((a, b) => b.uploaded - a.uploaded).slice(0, limit);
   const out = [];
   for (const obj of newest) {
     try {
       const st = await (await env.CTRL.get(obj.key)).json();
       out.push({
-        id: st.id, status: st.status, gpu: st.gpu || null, progress: st.progress || 0,
-        elapsed_s: st.elapsed_s || 0, error: st.error || "",
-        updated_at: Math.round(obj.uploaded / 1000),
+        id: st.id,
+        status: st.status,
+        gpu: st.gpu || null,
+        progress: st.progress || 0,
+        elapsed_s: st.elapsed_s || 0,
+        error: st.error || "",
+        updated_at: Math.round(obj.uploaded / 1e3),
       });
-    } catch { /* skip corrupt */ }
+    } catch {}
   }
   return out;
 }
@@ -84,27 +75,32 @@ async function getIndex(env, ids) {
     try {
       const obj = await env.CTRL.get(`${PREFIX}/edge_index/${id}.json`);
       if (obj) out[id] = await obj.json();
-    } catch { /* skip */ }
+    } catch {}
   }));
   return out;
 }
 
-/* ---------- WAKE: push the GPU kernel to Kaggle ---------- */
-
-const KAGGLE_SAVE_URL = "https://api.kaggle.com/v1/kernels.KernelsApiService/SaveKernel";
+// NOTE: the kernel writes boot_marker.json (and debug/*.json) at BUCKET ROOT —
+// its raw R2 helpers don't apply the vidgen/ prefix. Read it where it lands.
+async function getBootMarker(env) {
+  try {
+    const obj = await env.CTRL.get("boot_marker.json");
+    if (!obj) return null;
+    const m = await obj.json();
+    return m && m.at ? m : null;
+  } catch { return null; }
+}
 
 async function wakeKernel(request, env, url) {
   const { state, err } = await requirePin(request, env, url);
   if (err) return err;
 
-  // a wake was issued <10 min ago? the lane is already booting — don't stack sessions
-  if (state.wake_ts && Date.now() / 1000 - state.wake_ts < 600) {
+  if (state.wake_ts && Date.now() / 1e3 - state.wake_ts < WAKE_COOLDOWN_S) {
     return json({ ok: true, already_waking: true, detail: "a T4 session is already booting — riding it out" });
   }
   if (!env.KAGGLE_API_TOKEN) {
     return json({ error: "wake not provisioned — KAGGLE_API_TOKEN secret missing on the worker" }, 503);
   }
-
   const [codeObj, metaObj] = await Promise.all([
     env.CTRL.get(`${PREFIX}/boot/vidgen_kernel.py`),
     env.CTRL.get(`${PREFIX}/boot/kernel-metadata.json`),
@@ -115,9 +111,7 @@ async function wakeKernel(request, env, url) {
   const code = await codeObj.text();
   const meta = await metaObj.json();
 
-  await env.CTRL.put(`${PREFIX}/state.json`, JSON.stringify({
-    ...state, wake_ts: Math.round(Date.now() / 1000),
-  }));
+  await env.CTRL.put(`${PREFIX}/state.json`, JSON.stringify({ ...state, wake_ts: Math.round(Date.now() / 1e3) }));
 
   const body = {
     slug: meta.id,
@@ -140,7 +134,7 @@ async function wakeKernel(request, env, url) {
       headers: {
         "Authorization": `Bearer ${env.KAGGLE_API_TOKEN}`,
         "Content-Type": "application/json",
-        "User-Agent": "vidgen-edge/1.0",
+        "User-Agent": "vidgen-edge/1.1",
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(30000),
@@ -149,74 +143,78 @@ async function wakeKernel(request, env, url) {
     return json({ error: "kaggle api unreachable", detail: String(e).slice(0, 200) }, 502);
   }
   let data = {};
-  try { data = await resp.json(); } catch { /* non-json */ }
+  try { data = await resp.json(); } catch {}
   if (!resp.ok || (data && data.error)) {
-    const detail = data?.error?.message || data?.error || `kaggle http ${resp.status}`;
+    const detail = (data && data.error && (data.error.message || data.error)) || `kaggle http ${resp.status}`;
     return json({ error: "kaggle rejected the push", detail: String(detail).slice(0, 300) }, 502);
   }
   return json({
     ok: true,
     version: data.versionNumber ?? null,
     url: data.url ?? null,
-    detail: "T4s booting — ComfyUI + LTX-2.5 weights fetch on boot, worker claims jobs in ~10–15 min",
+    detail: "T4s booting — ComfyUI + LTX-2.5 weights fetch on boot, queue renders in ~10–15 min",
   });
 }
-
-/* ---------- router ---------- */
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
-
-    if (!path.startsWith("/api/")) {
-      return env.ASSETS.fetch(request);
-    }
-
+    if (!path.startsWith("/api/")) return env.ASSETS.fetch(request);
     try {
-      // PIN knock → cookie (the only unguarded route)
       if (path === "/api/knock" && request.method === "POST") {
         const state = await getState(env);
         const expected = state.panel_pin || "";
         let got = "";
-        try { got = (await request.json()).pin || ""; } catch { /* bad body */ }
+        try { got = (await request.json()).pin || ""; } catch {}
         if (!expected) return json({ error: "not provisioned" }, 503);
         if (!timingSafeEqual(got, expected)) return json({ error: "bad PIN" }, 401);
         const resp = json({ ok: true });
-        resp.headers.append("set-cookie",
-          `${PIN_COOKIE}=${encodeURIComponent(got)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
+        resp.headers.append("set-cookie", `${PIN_COOKIE}=${encodeURIComponent(got)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
         return resp;
       }
 
-      // queue + gallery
       if (path === "/api/jobs" && request.method === "GET") {
         const { state, err } = await requirePin(request, env, url);
         if (err) return err;
-        const statuses = await listStatuses(env);
+        const [statuses, boot] = await Promise.all([listStatuses(env), getBootMarker(env)]);
         const index = await getIndex(env, statuses.map((s) => s.id));
         const jobs = statuses.map((s) => ({
           ...s,
           prompt: index[s.id]?.prompt || "",
           mode: index[s.id]?.mode || null,
           aspect: index[s.id]?.aspect || null,
+          has_audio: index[s.id]?.audio !== false,
           created_at: index[s.id]?.created_at || null,
           media: s.status === "DONE"
-            ? { video: `/api/media/${PREFIX}/results/${s.id}/video.mp4`, thumb: `/api/media/${PREFIX}/results/${s.id}/thumb.jpg` }
+            ? { video: `/api/media/${PREFIX}/results/${s.id}/video.mp4?v=${MEDIA_VER}`, thumb: `/api/media/${PREFIX}/results/${s.id}/thumb.jpg?v=${MEDIA_VER}` }
             : null,
         }));
-        const wake_age = state.wake_ts ? Math.round(Date.now() / 1000) - state.wake_ts : null;
+        const wake_age = state.wake_ts ? Math.round(Date.now() / 1e3) - state.wake_ts : null;
+        const boot_ts = boot ? boot.at : null;
+        const boot_age = boot_ts ? Date.now() / 1e3 - boot_ts : null;
+        // Boot age alone lies (marker survives cancel/idle-exit). Honest liveness:
+        // fresh boot (< 20 min — covers the ~15 min weights fetch with no heartbeats)
+        // OR a kernel status heartbeat in the last 5 min.
+        const last_activity = statuses.reduce((m, s) => Math.max(m, s.updated_at || 0), 0) || null;
+        const last_activity_age = last_activity ? Date.now() / 1e3 - last_activity : null;
+        const session_live = (boot_age !== null && boot_age < 20 * 60) || (last_activity_age !== null && last_activity_age < 300);
         return json({
           jobs,
           lane: {
-            waking_recently: wake_age !== null && wake_age < 600,
+            waking_recently: wake_age !== null && wake_age < WAKE_COOLDOWN_S,
             wake_ts: state.wake_ts || null,
             pending: jobs.filter((j) => j.status === "QUEUED").length,
             rendering: jobs.filter((j) => j.status === "RENDERING").length,
+            boot_ts,
+            session_age_min: boot_age !== null ? boot_age / 60 : null,
+            last_activity_ts: last_activity,
+            session_live,
+            engine: ENGINE,
           },
         });
       }
 
-      // submit
       if (path === "/api/jobs" && request.method === "POST") {
         const { err } = await requirePin(request, env, url);
         if (err) return err;
@@ -235,20 +233,15 @@ export default {
           seed = n;
         }
         const audio = body.audio === false ? false : true;
-
         const id = crypto.randomUUID().replace(/-/g, "").slice(0, 24);
-        const spec = {
-          id, mode, prompt, aspect, seed, audio, super_res: false,
-          created_at: new Date().toISOString(),
-        };
+        const spec = { id, mode, prompt, aspect, seed, audio, super_res: false, created_at: new Date().toISOString() };
         await env.CTRL.put(`${PREFIX}/jobs/${id}/job.json`, JSON.stringify(spec), {
           httpMetadata: { contentType: "application/json" },
         });
-
         if (mode === "i2v") {
           const refB64 = String(body.ref_b64 || "");
           const m = /^data:image\/(png|jpeg|jpg);base64,(.+)$/i.exec(refB64) ||
-                    (/^[A-Za-z0-9+/=\s]+$/.test(refB64) && refB64.length > 100 ? [null, body.ref_mime || "jpeg", refB64] : null);
+            (/^[A-Za-z0-9+/=\s]+$/.test(refB64) && refB64.length > 100 ? [null, body.ref_mime || "jpeg", refB64] : null);
           if (!m) return json({ error: "i2v requires ref_b64 (data:image/...;base64,...)" }, 400);
           const ext = m[1].toLowerCase() === "png" ? "png" : "jpg";
           const bytes = Uint8Array.from(atob(m[2].replace(/\s/g, "")), (c) => c.charCodeAt(0));
@@ -257,32 +250,27 @@ export default {
             httpMetadata: { contentType: ext === "png" ? "image/png" : "image/jpeg" },
           });
         }
-
         await env.CTRL.put(`${PREFIX}/edge_index/${id}.json`, JSON.stringify({
-          prompt, mode, aspect, created_at: spec.created_at,
+          prompt, mode, aspect, audio, created_at: spec.created_at,
         }), { httpMetadata: { contentType: "application/json" } });
-
         return json({ ok: true, id, detail: "queued on the exchange" });
       }
 
-      // media streaming
       const mediaMatch = path.match(/^\/api\/media\/(.+)$/);
       if (mediaMatch && request.method === "GET") {
         const { err } = await requirePin(request, env, url);
         if (err) return err;
-        const key = decodeURIComponent(mediaMatch[1]);
+        const key = decodeURIComponent(mediaMatch[1]).replace(/\?.*$/, "");
         if (!key.startsWith(`${PREFIX}/results/`)) return json({ error: "not a media key" }, 400);
         if (!/\.(mp4|jpg|jpeg|png)$/.test(key)) return json({ error: "bad media type" }, 400);
         const obj = await env.CTRL.get(key);
         if (!obj) return json({ error: "not found" }, 404);
-        const ct = key.endsWith(".mp4") ? "video/mp4"
-          : key.endsWith(".png") ? "image/png" : "image/jpeg";
+        const ct = key.endsWith(".mp4") ? "video/mp4" : key.endsWith(".png") ? "image/png" : "image/jpeg";
         return new Response(obj.body, {
           headers: { "content-type": ct, "cache-control": "private, max-age=86400" },
         });
       }
 
-      // WAKE
       if (path === "/api/wake" && request.method === "POST") {
         return wakeKernel(request, env, url);
       }
