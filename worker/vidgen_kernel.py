@@ -63,6 +63,8 @@ for line in open(CFG_PATH):
         k, v = line.split("=", 1)
         ENV[k] = v
 os.environ.update({k: ENV[k] for k in ("R2_ACCOUNT", "R2_KEY", "R2_SECRET", "R2_BUCKET", "R2_PREFIX", "R2_ENDPOINT") if k in ENV})
+# T4 16 GB: fight fragmentation before torch initializes CUDA in any process
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 IDLE_EXIT_MIN = int(ENV.get("IDLE_EXIT_MIN", "10"))
 MAX_SESSION_MIN = int(ENV.get("MAX_SESSION_MIN", "300"))
@@ -133,10 +135,24 @@ def load_pipeline(gpu: str):
         m = getattr(pipe, comp, None)
         if m is not None:
             m.to(torch.float32)
-    try:
-        pipe.enable_model_cpu_offload()  # DiT resident, encoders/VAE stream
-    except Exception:
+    # memory ladder: model offload → (verify residency) → sequential → last resort all-GPU.
+    # v1 lesson: a silently-ignored offload left 14.2 GiB resident and OOM'd the i2v path.
+    strategy = "all-gpu"
+    for fn in ("enable_model_cpu_offload", "enable_sequential_cpu_offload"):
+        try:
+            getattr(pipe, fn)()
+            torch.cuda.synchronize()
+            resident = torch.cuda.memory_allocated() / 2**30
+            print(f"[{gpu}] {fn}: resident after apply = {resident:.2f} GiB", flush=True)
+            if resident < 4.0:
+                strategy = fn
+                break
+            print(f"[{gpu}] {fn} ignored by pipeline (still resident) — escalating", flush=True)
+        except Exception as e:
+            print(f"[{gpu}] {fn} unavailable: {type(e).__name__}: {e}", flush=True)
+    if strategy == "all-gpu":
         pipe.to("cuda")
+    print(f"[{gpu}] memory strategy: {strategy}", flush=True)
     try:
         pipe.vae.enable_tiling()  # decode headroom on 16 GB
     except Exception:
@@ -230,8 +246,9 @@ def worker_loop(gpu_index: int) -> None:
             base["image"] = None
             i2v = spec["mode"] == "i2v" and spec.get("ref_key_ext")
             if i2v:
-                import imageio.v2 as iio
-                base["image"] = iio.imread(ref_local_path(jid, spec["ref_key_ext"]))
+                from PIL import Image
+                img = Image.open(ref_local_path(jid, spec["ref_key_ext"])).convert("RGB")
+                base["image"] = img.resize((w, h), Image.LANCZOS)  # pre-fit: lighter VAE encode
 
             out = None
             for drop in ((), ("expand_prompts",), ("expand_prompts", "callback_on_step_end")):
@@ -299,6 +316,11 @@ def worker_loop(gpu_index: int) -> None:
         finally:
             if pinger is not None:
                 pinger.stop()
+            try:
+                import torch as _t
+                _t.cuda.empty_cache()  # release scratch between jobs
+            except Exception:
+                pass
 
 
 def ref_local_path(jid: str, ext: str) -> str:
