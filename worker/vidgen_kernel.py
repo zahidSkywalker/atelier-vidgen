@@ -40,7 +40,8 @@ def install_deps() -> None:
 
 
 CONFIG_DIR_CANDIDATES = [
-    "/kaggle/input/vidgen-config",
+    "/kaggle/input/datasets/xion678/vidgen-config",  # new Kaggle mount layout
+    "/kaggle/input/vidgen-config",                   # legacy layout fallback
     os.path.expanduser("~/.vidgen"),
     ".",
 ]
