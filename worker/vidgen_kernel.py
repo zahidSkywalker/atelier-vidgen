@@ -15,22 +15,29 @@ Quota discipline:
   - exits when the queue stays empty for IDLE_EXIT_MIN minutes
   - hard stop at MAX_SESSION_MIN minutes of wall time
 Requires dataset: xion678/vidgen-config (vidgen_runtime.env with R2 creds).
+
+T4 (sm75) notes:
+  - No bf16 GEMM on Turing → load bf16 (exact), then cast transformer/text
+    encoders to fp16 and VAE / audio VAE / vocoder to fp32 (bf16→fp32 is
+    lossless; fp16 overflow guards live in the output sanity check).
+  - No FlashAttention/SageAttention → SDPA math backend, slower but correct.
+  - Output guard rejects NaN / all-black frames instead of publishing them.
 """
 import os
 import subprocess
 import sys
 import time
 
-# ── runtime deps (kernel starts lean) ───────────────────────────
+# ── runtime deps (installed once in main(), not re-run by spawned children) ──
 def sh(cmd: str) -> None:
     subprocess.run(cmd, shell=True, check=True)
 
-print("[vidgen] installing deps…", flush=True)
-sh("pip install -q boto3 diffusers transformers accelerate safetensors soundfile imageio imageio-ffmpeg opencv-python-headless")
 
-import json
-import threading
-import multiprocessing as mp
+def install_deps() -> None:
+    print("[vidgen] installing deps…", flush=True)
+    sh("pip install -q boto3 diffusers transformers accelerate safetensors "
+       "soundfile imageio imageio-ffmpeg opencv-python-headless ftfy sentencepiece")
+
 
 CONFIG_DIR_CANDIDATES = [
     "/kaggle/input/vidgen-config",
@@ -38,12 +45,14 @@ CONFIG_DIR_CANDIDATES = [
     ".",
 ]
 
+
 def find_config_file() -> str:
     for d in CONFIG_DIR_CANDIDATES:
         p = os.path.join(d, "vidgen_runtime.env")
         if os.path.exists(p):
             return p
     raise SystemExit("vidgen_runtime.env not found (dataset xion678/vidgen-config attached?)")
+
 
 CFG_PATH = find_config_file()
 ENV = dict(os.environ)
@@ -67,41 +76,94 @@ except ImportError:
 T0 = time.time()
 
 
+class Pinger:
+    """Heartbeats RENDERING every 60 s so the bridge reaper never requeues a
+    live render (the 35 GB model download can outlast the 15-min stale mark)."""
+
+    def __init__(self, ex: Exchange, jid: str, gpu: str) -> None:
+        self.ex, self.jid, self.gpu = ex, jid, gpu
+        self.state = {"progress": 20}
+        self._stop = False
+        import threading
+        self.t = threading.Thread(target=self._run, daemon=True)
+        self.t.start()
+
+    def set(self, progress: int) -> None:
+        self.state["progress"] = max(self.state["progress"], progress)
+
+    def _run(self) -> None:
+        while not self._stop:
+            try:
+                self.ex.heartbeat(self.jid, "RENDERING", gpu=self.gpu,
+                                  progress=self.state["progress"],
+                                  elapsed_s=time.time() - T0)
+            except Exception:
+                pass
+            time.sleep(60)
+
+    def stop(self) -> None:
+        self._stop = True
+
+
+def _has_fp16(repo: str) -> bool:
+    try:
+        from huggingface_hub import model_info
+        files = [f.rfilename for f in model_info(repo, files_metadata=False).siblings or []]
+        return any("fp16" in f for f in files)
+    except Exception:
+        return False
+
+
+def load_pipeline(gpu: str):
+    import torch
+    from diffusers import Kandinsky6TI2VAPipeline
+
+    repo = ENV.get("KANDINSKY_REPO", "kandinskylab/Kandinsky-6.0-Lite-distill-5s-Diffusers")
+    print(f"[{gpu}] downloading/loading {repo} (bf16, exact)…", flush=True)
+    pipe = Kandinsky6TI2VAPipeline.from_pretrained(
+        repo, torch_dtype=torch.bfloat16, variant="fp16" if _has_fp16(repo) else None,
+    )
+    # Turing casting: DiT + text encoders → fp16 (compute), decoders → fp32 (safe)
+    for comp in ("transformer", "text_encoder", "text_encoder_2"):
+        m = getattr(pipe, comp, None)
+        if m is not None:
+            m.to(torch.float16)
+    for comp in ("vae", "audio_vae", "vocoder"):
+        m = getattr(pipe, comp, None)
+        if m is not None:
+            m.to(torch.float32)
+    try:
+        pipe.enable_model_cpu_offload()  # DiT resident, encoders/VAE stream
+    except Exception:
+        pipe.to("cuda")
+    try:
+        pipe.vae.enable_tiling()  # decode headroom on 16 GB
+    except Exception:
+        pass
+    print(f"[{gpu}] pipeline ready", flush=True)
+    return pipe
+
+
+def _audio_to_np(audio, ):
+    import numpy as np
+    import torch
+    if audio is None:
+        return None
+    if isinstance(audio, (list, tuple)):
+        audio = audio[0]
+    if isinstance(audio, torch.Tensor):
+        audio = audio.detach().float().cpu().numpy()
+    arr = np.asarray(audio, dtype=np.float32).squeeze()
+    return arr if arr.size else None
+
+
 def worker_loop(gpu_index: int) -> None:
     gpu = f"t4:{gpu_index}"
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
     import torch
     ex = Exchange()
-
     pipe = None
     audio_sr = None
-
-    def load_pipeline():
-        from diffusers import Kandinsky6TI2VAPipeline
-        import torch
-        nonlocal pipe, audio_sr
-        if pipe is not None:
-            return
-        print(f"[{gpu}] loading Kandinsky-6.0-Lite-distill-5s-Diffusers (first job)…", flush=True)
-        repo = ENV.get("KANDINSKY_REPO", "kandinskylab/Kandinsky-6.0-Lite-distill-5s-Diffusers")
-        pipe = Kandinsky6TI2VAPipeline.from_pretrained(
-            repo, torch_dtype=torch.float16, variant="fp16" if _has_fp16(repo) else None,
-        )
-        # T4 16 GB: module offload keeps the DiT resident, encoders/VAE stream
-        try:
-            pipe.enable_model_cpu_offload()
-        except Exception:
-            pass
-        audio_sr = getattr(pipe, "audio_sample_rate", 44100)
-        print(f"[{gpu}] pipeline ready", flush=True)
-
-    def _has_fp16(repo: str) -> bool:
-        try:
-            from huggingface_hub import model_info
-            files = [f.rfilename for f in model_info(repo, files_metadata=False).siblings or []]
-            return any("fp16" in f for f in files)
-        except Exception:
-            return False
 
     idle_since = None
     while True:
@@ -121,50 +183,87 @@ def worker_loop(gpu_index: int) -> None:
         spec = jobs[gpu_index % len(jobs)]  # with 2 GPUs each takes a different head job
         jid = spec["id"]
         t0 = time.time()
+        pinger = None
         try:
             claimed = ex.claim(jid, spec["_key"])
             if claimed is None:
                 continue
             print(f"[{gpu}] claimed {jid[:10]} ({spec['mode']})", flush=True)
-            ex.heartbeat(jid, "RENDERING", gpu=gpu, progress=15)
+            pinger = Pinger(ex, jid, gpu)
+            pinger.set(15)
 
-            load_pipeline()
-            import torch
+            if pipe is None:
+                pinger.set(30)
+                pipe = load_pipeline(gpu)
+                audio_sr = getattr(pipe, "audio_sample_rate", 44100)
+            pinger.set(40)
 
             dims = {"portrait": (480, 864), "landscape": (864, 480)}
             h, w = dims.get(spec.get("aspect", "portrait"), dims["portrait"])
+            prompt = spec["prompt"]
             kwargs = dict(
-                prompt=spec["prompt"],
+                prompt=prompt,
                 height=h,
                 width=w,
                 num_frames=121,
                 num_inference_steps=10,
                 guidance_scale=1.0,
             )
+
             generator = None
             if spec.get("seed") is not None:
                 generator = torch.Generator("cuda").manual_seed(int(spec["seed"]))
                 kwargs["generator"] = generator
 
-            ex.heartbeat(jid, "RENDERING", gpu=gpu, progress=40)
-            out = None
-            if spec["mode"] == "i2v" and spec.get("ref_key_ext"):
+            steps = kwargs["num_inference_steps"]
+
+            def _step_cb(p, i, t, cbk):
+                pinger.set(40 + int(35 * (i + 1) / steps))
+                return {}
+
+            # progressive call: strip optional kwargs the pipeline build refuses
+            base = dict(kwargs)
+            base["callback_on_step_end"] = _step_cb
+            if len(prompt) < 200:
+                base["expand_prompts"] = True
+            base["image"] = None
+            i2v = spec["mode"] == "i2v" and spec.get("ref_key_ext")
+            if i2v:
                 import imageio.v2 as iio
-                ref = iio.imread(ref_local_path(jid, spec["ref_key_ext"]))
+                base["image"] = iio.imread(ref_local_path(jid, spec["ref_key_ext"]))
+
+            out = None
+            for drop in ((), ("expand_prompts",), ("expand_prompts", "callback_on_step_end")):
+                call = {k: v for k, v in base.items() if k not in drop}
+                if not i2v or call.get("image") is None:
+                    call.pop("image", None)
                 try:
-                    out = pipe(image=ref, **kwargs)
-                except TypeError:
-                    print(f"[{gpu}] pipeline refused image= kwarg — falling back to T2V", flush=True)
-                    out = pipe(**kwargs)
-            else:
-                out = pipe(**kwargs)
+                    out = pipe(**call)
+                    break
+                except TypeError as te:
+                    msg = str(te)
+                    print(f"[{gpu}] call rejected ({msg[:120]}) — retrying leaner", flush=True)
+                    if "image" in msg and i2v:
+                        print(f"[{gpu}] pipeline refused image= — falling back to T2V", flush=True)
+                        base.pop("image", None)
+                        i2v = False
+                    last_err = te
+            if out is None:
+                raise RuntimeError(f"pipeline call refused in all fallbacks: {last_err}")
 
             frames = out.frames[0]
-            audio = getattr(out, "audio", None)
-            ex.heartbeat(jid, "RENDERING", gpu=gpu, progress=80)
+            audio_np = _audio_to_np(getattr(out, "audio", None))
+            pinger.set(80)
+
+            # honest-fail guard: never publish NaN / black frames (imagegen lesson)
+            import numpy as np
+            arr = np.asarray(frames, dtype=np.float32)
+            if arr.size == 0 or not np.isfinite(arr).all():
+                raise RuntimeError("degenerate output: non-finite frames (fp16 overflow suspected)")
+            if float(arr.std()) < 1e-3:
+                raise RuntimeError("degenerate output: flat/black frames")
 
             import imageio
-            import numpy as np
             workdir = f"/tmp/vidgen_{jid[:10]}"
             os.makedirs(workdir, exist_ok=True)
             silent = os.path.join(workdir, "silent.mp4")
@@ -172,10 +271,10 @@ def worker_loop(gpu_index: int) -> None:
                              macro_block_size=16)
 
             final = silent
-            if spec.get("audio", True) and audio is not None and len(audio):
+            if spec.get("audio", True) and audio_np is not None:
                 import soundfile as sf
                 wav = os.path.join(workdir, "audio.wav")
-                sf.write(wav, np.asarray(audio), audio_sr or 44100)
+                sf.write(wav, audio_np, audio_sr or 44100)
                 final = os.path.join(workdir, "video.mp4")
                 sh(f'ffmpeg -y -loglevel error -i "{silent}" -i "{wav}" -c:v copy -c:a aac -b:a 160k -shortest -movflags +faststart "{final}"')
             else:
@@ -185,6 +284,8 @@ def worker_loop(gpu_index: int) -> None:
             thumb = os.path.join(workdir, "thumb.jpg")
             sh(f'ffmpeg -y -loglevel error -i "{final}" -vf "select=eq(n\\,24)" -frames:v 1 "{thumb}"')
             ex.publish_result(jid, final, thumb, gpu, time.time() - t0)
+            pinger.stop()
+            pinger = None
             print(f"[{gpu}] {jid[:10]} DONE in {time.time() - t0:.0f}s", flush=True)
         except Exception as e:
             import traceback
@@ -194,6 +295,9 @@ def worker_loop(gpu_index: int) -> None:
             except Exception:
                 pass
             print(f"[{gpu}] {jid[:10]} FAILED: {e}", flush=True)
+        finally:
+            if pinger is not None:
+                pinger.stop()
 
 
 def ref_local_path(jid: str, ext: str) -> str:
@@ -203,17 +307,6 @@ def ref_local_path(jid: str, ext: str) -> str:
         ex = Exchange()
         ex.get_file(f"{ex.prefix}/jobs/{jid}/ref.{ext}", p)
     return p
-
-
-def claim_with_ref(ex: Exchange, spec: dict, gpu_index: int) -> None:
-    """Download the i2v reference frame right after claiming."""
-    jid = spec["id"]
-    for ext in ("jpg", "png"):
-        p = f"/tmp/vidgen_{jid[:10]}/ref.{ext}"
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        if ex.get_file(f"{ex.prefix}/jobs/{jid}/ref.{ext}", p):
-            spec["ref_key_ext"] = ext
-            return
 
 
 # patch claim to also fetch ref for i2v
@@ -231,22 +324,28 @@ def _claim_with_ref(self, jid: str, key: str):
 Exchange.claim = _claim_with_ref
 
 
-if __name__ == "__main__":
-    try:
-        import torch
-        n_gpus = torch.cuda.device_count()
-    except Exception:
-        n_gpus = 0
+def main() -> None:
+    install_deps()
+    import torch
+    n_gpus = torch.cuda.device_count()
     print(f"[vidgen] {n_gpus} CUDA device(s) visible", flush=True)
     if n_gpus == 0:
         raise SystemExit("No CUDA device — attach a GPU accelerator to this kernel.")
     if n_gpus == 1:
         worker_loop(0)
-    else:
-        procs = []
-        for i in range(min(n_gpus, 2)):  # dual-T4: one worker per card
-            p = mp.Process(target=worker_loop, args=(i,))
-            p.start()
-            procs.append(p)
-        for p in procs:
-            p.join()
+        return
+    import multiprocessing as mp
+    # spawn (not fork): parent touched CUDA via device_count; forked children
+    # would die with "Cannot re-initialize CUDA in forked subprocess"
+    mp.set_start_method("spawn", force=True)
+    procs = []
+    for i in range(min(n_gpus, 2)):  # dual-T4: one worker per card
+        p = mp.Process(target=worker_loop, args=(i,))
+        p.start()
+        procs.append(p)
+    for p in procs:
+        p.join()
+
+
+if __name__ == "__main__":
+    main()
