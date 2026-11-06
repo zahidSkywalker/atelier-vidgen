@@ -3,303 +3,402 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Atelier VidGen</title>
-<meta name="theme-color" content="#0a0a0f">
+<title>Atelier VidGen — LTX-2.5</title>
 <style>
-  :root{
-    --bg:#0a0a0f; --bg2:#101018; --card:#14141d; --line:#23232f;
-    --amber:#f59e0b; --amber2:#fbbf24; --txt:#e8e8ef; --mut:#8b8b9e;
-    --green:#34d399; --red:#f87171; --blue:#60a5fa; --r:14px;
+  :root {
+    --bg: #0b0d12; --panel: #12151d; --panel2: #171b25; --line: #232936;
+    --txt: #e8ebf2; --dim: #8b93a7; --acc: #6c8cff; --acc2: #8f6cff;
+    --ok: #3ecf8e; --warn: #f5a623; --bad: #ff5d5d; --r: 14px;
   }
-  *{box-sizing:border-box; margin:0; padding:0}
-  html,body{background:var(--bg); color:var(--txt); font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-  body{min-height:100vh; background:radial-gradient(1200px 500px at 50% -200px,#1a1430 0%,var(--bg) 60%)}
-  .wrap{max-width:1080px; margin:0 auto; padding:18px 16px 60px}
-  header{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:18px; flex-wrap:wrap}
-  .brand{display:flex; align-items:center; gap:10px}
-  .logo{width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,#f59e0b,#b45309);display:grid;place-items:center;font-size:20px}
-  h1{font-size:19px; letter-spacing:.3px}
-  h1 small{display:block;font-size:11.5px;color:var(--mut);font-weight:400;letter-spacing:.6px;text-transform:uppercase}
-  .lane{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--mut);background:var(--card);border:1px solid var(--line);padding:7px 12px;border-radius:999px}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--mut)}
-  .dot.warm{background:var(--amber); box-shadow:0 0 8px var(--amber)}
-  .dot.idle{background:#3f3f50}
-  .tabs{display:grid; grid-template-columns:1fr 1fr; gap:8px; background:var(--bg2); border:1px solid var(--line); padding:6px; border-radius:12px; margin-bottom:14px}
-  .tab{border:0;background:transparent;color:var(--mut);padding:10px;border-radius:9px;font-weight:600;font-size:14px;cursor:pointer;transition:.15s}
-  .tab.on{background:var(--card);color:var(--amber2);box-shadow:0 1px 0 #ffffff12 inset}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px;margin-bottom:14px}
-  textarea{width:100%;min-height:96px;resize:vertical;background:var(--bg2);border:1px solid var(--line);border-radius:10px;color:var(--txt);padding:12px;font:inherit}
-  textarea:focus,input:focus,select:focus{outline:none;border-color:var(--amber)}
-  .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
-  .field{display:flex;flex-direction:column;gap:5px;flex:1;min-width:130px}
-  label{font-size:11.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.7px}
-  input,select{background:var(--bg2);border:1px solid var(--line);border-radius:10px;color:var(--txt);padding:10px 12px;font:inherit;width:100%}
-  .seg{display:flex;gap:6px}
-  .seg button{flex:1;background:var(--bg2);border:1px solid var(--line);color:var(--mut);padding:9px;border-radius:9px;cursor:pointer;font-weight:600;font-size:13px}
-  .seg button.on{border-color:var(--amber);color:var(--amber2);background:#f59e0b14}
-  .switch{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
-  .switch input{display:none}
-  .knob{width:36px;height:20px;border-radius:999px;background:#2a2a38;position:relative;transition:.15s}
-  .knob::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#6b6b80;transition:.15s}
-  .switch input:checked + .knob{background:#f59e0b55}
-  .switch input:checked + .knob::after{left:18px;background:var(--amber2)}
-  .samples{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-  .samples button{background:var(--bg2);border:1px solid var(--line);color:var(--mut);font-size:12px;padding:6px 10px;border-radius:999px;cursor:pointer}
-  .samples button:hover{color:var(--amber2);border-color:var(--amber)}
-  .drop{margin-top:12px;border:1.5px dashed var(--line);border-radius:12px;padding:18px;text-align:center;color:var(--mut);font-size:13.5px;cursor:pointer;transition:.15s}
-  .drop.over{border-color:var(--amber);color:var(--amber2);background:#f59e0b0d}
-  .drop img{max-height:120px;border-radius:8px;display:block;margin:8px auto 0}
-  .render{width:100%;margin-top:14px;background:linear-gradient(135deg,#f59e0b,#d97706);border:0;color:#1a1205;font-weight:800;font-size:15px;padding:13px;border-radius:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px}
-  .render:disabled{opacity:.55;cursor:wait}
-  h2{font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin:22px 0 10px;display:flex;align-items:center;gap:8px}
-  h2 .n{background:var(--bg2);border:1px solid var(--line);border-radius:999px;padding:1px 9px;font-size:11px;color:var(--txt)}
-  .job{display:flex;gap:12px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px}
-  .job .thumb{width:74px;height:44px;border-radius:7px;background:var(--bg2);flex:none;display:grid;place-items:center;font-size:18px;overflow:hidden}
-  .job .meta{flex:1;min-width:0}
-  .job .meta p{font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--txt)}
-  .job .meta span{font-size:11.5px;color:var(--mut)}
-  .badge{font-size:10.5px;font-weight:700;letter-spacing:.5px;padding:3px 9px;border-radius:999px;flex:none}
-  .b-QUEUED{background:#f59e0b1c;color:var(--amber2)}
-  .b-RENDERING{background:#60a5fa1c;color:var(--blue)}
-  .b-DONE{background:#34d3991c;color:var(--green)}
-  .b-FAILED{background:#f871711c;color:var(--red)}
-  .bar{height:4px;background:var(--bg2);border-radius:99px;margin-top:7px;overflow:hidden}
-  .bar i{display:block;height:100%;background:linear-gradient(90deg,#f59e0b,#fbbf24);border-radius:99px;transition:width .6s}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
-  .clip{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;cursor:pointer;transition:.15s}
-  .clip:hover{border-color:#f59e0b66;transform:translateY(-2px)}
-  .clip .ph{aspect-ratio:16/9;background:var(--bg2);display:grid;place-items:center}
-  .clip .ph img{width:100%;height:100%;object-fit:cover}
-  .clip .cap{padding:10px 12px}
-  .clip .cap p{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .clip .cap span{font-size:11px;color:var(--mut)}
-  .empty{color:var(--mut);font-size:13.5px;text-align:center;padding:26px;border:1px dashed var(--line);border-radius:12px}
-  dialog{background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:16px;padding:14px;max-width:min(92vw,760px)}
-  dialog::backdrop{background:#000a}
-  dialog video{width:100%;border-radius:10px;background:#000;max-height:70vh}
-  dialog .drow{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}
-  dialog a{color:var(--amber2);font-size:13.5px;text-decoration:none;border:1px solid var(--line);padding:7px 12px;border-radius:9px}
-  .wake{background:var(--bg2);border:1px solid var(--line);color:var(--amber2);font-size:12.5px;font-weight:700;padding:8px 14px;border-radius:999px;cursor:pointer}
-  .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(80px);background:#1c1c28;border:1px solid var(--line);color:var(--txt);padding:11px 18px;border-radius:12px;font-size:13.5px;transition:.25s;max-width:90vw;z-index:9}
-  .toast.show{transform:translateX(-50%) translateY(0)}
-  .toast.err{border-color:#f8717155}
-  /* PIN gate */
-  .gate{position:fixed;inset:0;background:var(--bg);display:grid;place-items:center;z-index:10}
-  .gate .box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px;width:min(90vw,340px);text-align:center}
-  .gate input{text-align:center;letter-spacing:6px;font-size:20px;margin:14px 0}
-  .gate button{width:100%;background:var(--amber);border:0;color:#1a1205;font-weight:800;padding:11px;border-radius:10px;cursor:pointer}
-  @media (max-width:560px){ .grid{grid-template-columns:1fr 1fr} h1{font-size:16px} }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: radial-gradient(1200px 600px at 70% -10%, #161c2e 0%, var(--bg) 55%);
+    color: var(--txt);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 20px 16px 60px; }
+
+  /* ── gate ── */
+  #gate { display: flex; align-items: center; justify-content: center; min-height: 86vh; }
+  .gate-card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 18px;
+    padding: 36px 30px; width: 340px; text-align: center;
+    box-shadow: 0 20px 60px rgba(0,0,0,.45);
+  }
+  .gate-card h1 { font-size: 19px; font-weight: 650; letter-spacing: .4px; }
+  .gate-card p { color: var(--dim); font-size: 13px; margin: 8px 0 20px; }
+  #pin {
+    width: 100%; padding: 13px; font-size: 22px; letter-spacing: 10px; text-align: center;
+    background: var(--panel2); color: var(--txt); border: 1px solid var(--line);
+    border-radius: 10px; outline: none; transition: border .15s;
+  }
+  #pin:focus { border-color: var(--acc); }
+  #unlock {
+    width: 100%; margin-top: 14px; padding: 12px; border: 0; border-radius: 10px;
+    background: linear-gradient(135deg, var(--acc), var(--acc2)); color: #fff;
+    font-size: 15px; font-weight: 600; cursor: pointer; transition: filter .15s;
+  }
+  #unlock:hover { filter: brightness(1.12); }
+  .gate-err { color: var(--bad); font-size: 13px; min-height: 18px; margin-top: 10px; }
+  .shake { animation: shake .35s; }
+  @keyframes shake { 20% { transform: translateX(-7px);} 40% { transform: translateX(7px);} 60% { transform: translateX(-4px);} 80% { transform: translateX(4px);} }
+
+  /* ── studio ── */
+  #studio { display: none; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+  .mark {
+    width: 38px; height: 38px; border-radius: 11px; flex: none;
+    background: linear-gradient(135deg, var(--acc), var(--acc2));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 17px; color: #fff;
+  }
+  header .t { font-size: 17px; font-weight: 650; }
+  header .s { color: var(--dim); font-size: 12.5px; }
+  .lane {
+    display: inline-flex; align-items: center; gap: 7px; margin-left: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+    padding: 6px 14px; font-size: 12.5px; color: var(--dim);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.live { background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: pulse 1.6s infinite; }
+  .dot.warm { background: var(--warn); }
+  @keyframes pulse { 50% { opacity: .45; } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+    padding: 18px; margin-bottom: 18px;
+  }
+  .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  .tab {
+    flex: 1; padding: 10px; text-align: center; border-radius: 10px; cursor: pointer;
+    background: var(--panel2); border: 1px solid var(--line); color: var(--dim);
+    font-weight: 600; font-size: 14px; transition: all .15s;
+  }
+  .tab.on { background: linear-gradient(135deg, rgba(108,140,255,.16), rgba(143,108,255,.16));
+            border-color: var(--acc); color: var(--txt); }
+  textarea {
+    width: 100%; min-height: 92px; resize: vertical; padding: 12px 14px;
+    background: var(--panel2); color: var(--txt); border: 1px solid var(--line);
+    border-radius: 10px; font: inherit; outline: none; transition: border .15s;
+  }
+  textarea:focus { border-color: var(--acc); }
+  .row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+  .chips { display: flex; gap: 8px; }
+  .chip {
+    padding: 8px 14px; border-radius: 9px; cursor: pointer; font-size: 13px; font-weight: 600;
+    background: var(--panel2); border: 1px solid var(--line); color: var(--dim); transition: all .15s;
+  }
+  .chip.on { border-color: var(--acc); color: var(--txt); background: rgba(108,140,255,.13); }
+  .seed {
+    background: var(--panel2); border: 1px solid var(--line); color: var(--txt);
+    border-radius: 9px; padding: 8px 12px; font: inherit; width: 130px; outline: none;
+  }
+  .seed:focus { border-color: var(--acc); }
+  .meta { color: var(--dim); font-size: 12px; }
+  .go {
+    margin-left: auto; padding: 11px 26px; border: 0; border-radius: 10px; cursor: pointer;
+    background: linear-gradient(135deg, var(--acc), var(--acc2)); color: #fff;
+    font-weight: 700; font-size: 14.5px; transition: filter .15s;
+  }
+  .go:disabled { filter: grayscale(.6) brightness(.65); cursor: not-allowed; }
+  .go:hover:not(:disabled) { filter: brightness(1.12); }
+
+  /* i2v drop */
+  #drop {
+    margin-top: 12px; border: 1.5px dashed var(--line); border-radius: 12px;
+    padding: 18px; text-align: center; color: var(--dim); font-size: 13.5px;
+    cursor: pointer; transition: border .15s, background .15s; display: none;
+  }
+  #drop:hover, #drop.over { border-color: var(--acc); background: rgba(108,140,255,.06); }
+  #dropImg { max-height: 120px; border-radius: 8px; display: none; margin: 0 auto 6px; display: block; }
+  #drop img { max-height: 110px; border-radius: 8px; }
+
+  /* queue */
+  .qhead { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+  .qhead h2 { font-size: 14px; font-weight: 650; letter-spacing: .5px; text-transform: uppercase; color: var(--dim); }
+  .qitem {
+    display: flex; align-items: center; gap: 12px; padding: 11px 14px;
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px;
+  }
+  .qmode { font-size: 11px; font-weight: 700; letter-spacing: .6px; color: var(--acc);
+           background: rgba(108,140,255,.13); border-radius: 6px; padding: 3px 8px; flex: none; }
+  .qtext { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dim); font-size: 13.5px; }
+  .qbar { width: 110px; height: 6px; background: #0d1017; border-radius: 4px; overflow: hidden; flex: none; }
+  .qbar > div { height: 100%; background: linear-gradient(90deg, var(--acc), var(--acc2)); border-radius: 4px; transition: width .8s; }
+  .qpct { font-size: 12px; color: var(--dim); width: 38px; text-align: right; flex: none; }
+  .pill { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; flex: none; }
+  .pill.QUEUED { background: rgba(245,166,35,.14); color: var(--warn); }
+  .pill.RENDERING { background: rgba(108,140,255,.14); color: var(--acc); }
+  .pill.FAILED { background: rgba(255,93,93,.14); color: var(--bad); }
+  .empty { color: var(--dim); font-size: 13.5px; text-align: center; padding: 14px 0 4px; }
+
+  /* gallery */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+  .clip { background: var(--panel2); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .clip video { width: 100%; display: block; background: #000; }
+  .clip .cbody { padding: 10px 12px 12px; }
+  .clip .ctext { font-size: 13px; color: var(--txt); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .clip .cfoot { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--dim); font-size: 11.5px; }
+  .clip a { color: var(--acc); text-decoration: none; margin-left: auto; font-weight: 600; }
+  .clip a:hover { text-decoration: underline; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(20px);
+    background: #1c2130; color: var(--txt); border: 1px solid var(--bad);
+    padding: 11px 20px; border-radius: 10px; font-size: 13.5px; opacity: 0;
+    transition: all .25s; pointer-events: none; max-width: 90vw; z-index: 50;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  @media (max-width: 640px) {
+    .wrap { padding: 14px 10px 50px; }
+    .qbar { width: 70px; }
+    .go { width: 100%; margin: 4px 0 0; }
+  }
 </style>
 </head>
 <body>
-<div class="gate" id="gate" style="display:none">
-  <div class="box">
-    <div class="logo" style="margin:0 auto 10px">🎬</div>
-    <h1 style="font-size:16px">Atelier VidGen</h1>
-    <p style="color:var(--mut);font-size:12.5px;margin-top:4px">enter panel PIN</p>
-    <input id="pin" type="password" inputmode="numeric" maxlength="8" placeholder="••••">
-    <button id="knockBtn">Unlock</button>
-    <p id="gateErr" style="color:var(--red);font-size:12px;margin-top:9px;min-height:15px"></p>
+
+<div id="gate">
+  <div class="gate-card" id="gateCard">
+    <h1>Atelier VidGen</h1>
+    <p>LTX-2.5 · 22B distilled · synced audio<br>Enter the studio PIN</p>
+    <input id="pin" type="password" inputmode="numeric" autocomplete="off" placeholder="••••">
+    <button id="unlock">Unlock</button>
+    <div class="gate-err" id="gateErr"></div>
   </div>
 </div>
 
-<div class="wrap">
+<div class="wrap" id="studio">
   <header>
-    <div class="brand">
-      <div class="logo">🎬</div>
-      <h1>Atelier VidGen<small>Kandinsky 6.0 Lite · 2× Tesla T4 · 5 s clip + audio</small></h1>
+    <div class="mark">V</div>
+    <div>
+      <div class="t">Atelier VidGen</div>
+      <div class="s">LTX-2.5 · 22B distilled UD-Q4_K_XL · 8+3 steps · dual T4</div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center">
-      <div class="lane"><span class="dot idle" id="laneDot"></span><span id="laneTxt">lane idle</span></div>
-      <button class="wake" id="wakeBtn" title="Boot the GPU worker session on Kaggle (dual T4)">⚡ Wake lane</button>
-    </div>
+    <div class="lane"><span class="dot" id="laneDot"></span><span id="laneTxt">checking lane…</span></div>
   </header>
 
-  <div class="tabs">
-    <button class="tab on" id="tabT2V">✍️&nbsp; Text → Video</button>
-    <button class="tab" id="tabI2V">🖼️&nbsp; Image → Video</button>
+  <div class="card">
+    <div class="tabs">
+      <div class="tab on" id="tabT2V" data-mode="t2v">Text → Video</div>
+      <div class="tab" id="tabI2V" data-mode="i2v">Image → Video</div>
+    </div>
+    <textarea id="prompt" maxlength="2000" placeholder="Describe the scene — subjects, action, camera, lighting, mood. LTX-2.5 keeps long prompts intact and generates the soundtrack too."></textarea>
+    <div id="drop">
+      <img id="dropImg" alt="" style="display:none">
+      <span id="dropTxt">Drop a start frame here, or click to choose — PNG / JPG</span>
+      <input id="file" type="file" accept="image/png,image/jpeg" style="display:none">
+    </div>
+    <div class="row">
+      <div class="chips">
+        <div class="chip on" id="chLand" data-aspect="landscape">16:9 · 864×480</div>
+        <div class="chip" id="chPort" data-aspect="portrait">9:16 · 480×864</div>
+      </div>
+      <input class="seed" id="seed" type="number" min="0" max="4294967295" placeholder="seed (optional)">
+      <span class="meta">5 s · 121 frames · 24 fps · synced audio</span>
+      <button class="go" id="go">Generate</button>
+    </div>
   </div>
 
   <div class="card">
-    <textarea id="prompt" maxlength="1200" placeholder="Describe the shot — camera move, light, mood… and the sound."></textarea>
-    <div class="samples">
-      <button data-p="Cinematic shot: a lone lighthouse on a stormy cliff at dusk, waves exploding against black rock, the beam sweeping through sea fog. Camera slowly pushes in from a low angle. Photoreal, moody teal and amber grade, rain streaks. Audio: crashing waves, deep wind howl, distant thunder. No dialogue, text, or logos.">🗼 Lighthouse</button>
-      <button data-p="Cinematic shot: neon rain over an empty night market, reflections rippling in puddles, steam curling from food stalls. Slow dolly forward, shallow depth of field. Audio: soft rain, buzzing neon, distant sizzle. No dialogue, text, or logos.">🏮 Neon market</button>
-      <button data-p="Cinematic shot: a red dragon wakes on a mound of gold coins in a sunlit cave, slowly unfolds its wings. Camera pushes in toward its eyes. Photoreal fantasy, warm golden light, dust motes. Audio: deep rumbling breath, clinking coins, distant roar. No dialogue, text, or logos.">🐉 Dragon</button>
-      <button data-p="Golden hour drone shot flying over a misty pine forest, sun rays cutting through fog between the trees. Smooth forward glide. Audio: wind, birdsong, warm ambient drone. No dialogue, text, or logos.">🌲 Forest drone</button>
-    </div>
-    <div class="drop" id="drop" style="display:none">
-      <span id="dropTxt">drop the reference frame here — it becomes the first frame</span>
-      <img id="dropPrev" style="display:none">
-    </div>
-    <input type="file" id="file" accept="image/png,image/jpeg" style="display:none">
-    <div class="row">
-      <div class="field" style="max-width:220px">
-        <label>Aspect</label>
-        <div class="seg">
-          <button id="asP" class="on">9:16 · 480×864</button>
-          <button id="asL">16:9 · 864×480</button>
-        </div>
-      </div>
-      <div class="field" style="max-width:160px">
-        <label>Seed (blank = random)</label>
-        <input id="seed" type="number" min="0" max="4294967295" placeholder="random">
-      </div>
-      <div class="field" style="max-width:150px;justify-content:flex-end">
-        <label>Synced audio</label>
-        <label class="switch"><input type="checkbox" id="audio" checked><span class="knob"></span><span style="font-size:12.5px;color:var(--mut)">44 kHz</span></label>
-      </div>
-    </div>
-    <button class="render" id="renderBtn">🎬 Render clip</button>
+    <div class="qhead"><h2>Lane</h2></div>
+    <div id="queue"><div class="empty">No active jobs.</div></div>
   </div>
 
-  <h2>Render queue <span class="n" id="qN">0</span></h2>
-  <div id="queue"></div>
-
-  <h2>Gallery <span class="n" id="gN">0</span></h2>
-  <div class="grid" id="gallery"></div>
+  <div class="card">
+    <div class="qhead"><h2>Gallery</h2></div>
+    <div class="grid" id="gallery"><div class="empty">Nothing rendered yet.</div></div>
+  </div>
 </div>
 
-<dialog id="player">
-  <video id="vid" controls autoplay loop></video>
-  <div class="drow">
-    <p id="vidMeta" style="font-size:12px;color:var(--mut);flex:1"></p>
-    <a id="dl" download>⬇ mp4</a>
-    <button class="wake" onclick="document.getElementById('player').close()">Close</button>
-  </div>
-</dialog>
-
-<div class="toast" id="toast"></div>
+<div id="toast"></div>
 
 <script>
-const $ = (s) => document.querySelector(s);
-let mode = "t2v", aspect = "portrait", refData = null, refMime = null, seen = {};
+"use strict";
+const $ = (id) => document.getElementById(id);
+let mode = "t2v", aspect = "landscape", refB64 = null, refMime = "jpeg";
+let seen = new Set();
 
-function toast(msg, err){ const t = $("#toast"); t.textContent = msg; t.className = "toast show" + (err ? " err" : ""); setTimeout(()=>t.className="toast"+(err?" err":""), 4200); }
-
-async function api(path, opts={}){
-  const r = await fetch(path, opts);
-  if (r.status === 401){ $("#gate").style.display = "grid"; throw new Error("locked"); }
-  const j = await r.json().catch(()=>({error:"bad response"}));
-  if (!r.ok) throw new Error(j.error + (j.detail ? " — "+j.detail : ""));
-  return j;
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 4200);
 }
 
-$("#knockBtn").onclick = knock;
-$("#pin").addEventListener("keydown", e => { if (e.key === "Enter") knock(); });
-async function knock(){
+/* ── gate ── */
+async function knock(pin) {
+  const r = await fetch("/api/knock", { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin }) });
+  return r.ok;
+}
+async function tryUnlock() {
+  const pin = $("pin").value.trim();
+  if (!pin) return;
+  $("unlock").disabled = true;
   try {
-    await api("/api/knock", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({pin: $("#pin").value}) });
-    $("#gate").style.display = "none"; refresh();
-  } catch(e){ $("#gateErr").textContent = e.message === "locked" ? "" : e.message; }
+    if (await knock(pin)) { enterStudio(); }
+    else {
+      $("gateErr").textContent = "Wrong PIN — try again";
+      $("gateCard").classList.remove("shake"); void $("gateCard").offsetWidth;
+      $("gateCard").classList.add("shake");
+    }
+  } catch { $("gateErr").textContent = "Network error — retry"; }
+  $("unlock").disabled = false;
+}
+$("unlock").onclick = tryUnlock;
+$("pin").addEventListener("keydown", (e) => { if (e.key === "Enter") tryUnlock(); });
+
+function enterStudio() {
+  $("gate").style.display = "none";
+  $("studio").style.display = "block";
+  refresh(); setInterval(refresh, 4000);
 }
 
-$("#tabT2V").onclick = () => setMode("t2v");
-$("#tabI2V").onclick = () => setMode("i2v");
-function setMode(m){
-  mode = m;
-  $("#tabT2V").classList.toggle("on", m==="t2v");
-  $("#tabI2V").classList.toggle("on", m==="i2v");
-  $("#drop").style.display = m==="i2v" ? "block" : "none";
-}
-$("#asP").onclick = () => { aspect="portrait"; $("#asP").classList.add("on"); $("#asL").classList.remove("on"); };
-$("#asL").onclick = () => { aspect="landscape"; $("#asL").classList.add("on"); $("#asP").classList.remove("on"); };
-document.querySelectorAll(".samples button").forEach(b => b.onclick = () => { $("#prompt").value = b.dataset.p; if (mode==="i2v") setMode("t2v"); });
+/* auto-resume via cookie */
+fetch("/api/jobs").then(async (r) => { if (r.ok) enterStudio(); }).catch(() => {});
 
-const drop = $("#drop"), file = $("#file");
-drop.onclick = () => file.click();
-drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
-drop.ondragleave = () => drop.classList.remove("over");
-drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files[0]) loadRef(e.dataTransfer.files[0]); };
-file.onchange = () => { if (file.files[0]) loadRef(file.files[0]); };
-function loadRef(f){
-  if (!/^image\/(png|jpe?g)$/.test(f.type)) return toast("png / jpeg only", true);
-  const r = new FileReader();
-  r.onload = () => { refData = r.result; refMime = f.type;
-    $("#dropPrev").src = r.result; $("#dropPrev").style.display = "block";
-    $("#dropTxt").textContent = "reference frame ready — tap to change"; };
-  r.readAsDataURL(f);
+/* ── composer ── */
+for (const t of document.querySelectorAll(".tab")) {
+  t.onclick = () => {
+    document.querySelectorAll(".tab").forEach((x) => x.classList.remove("on"));
+    t.classList.add("on");
+    mode = t.dataset.mode;
+    $("drop").style.display = mode === "i2v" ? "block" : "none";
+  };
+}
+for (const c of document.querySelectorAll(".chip")) {
+  c.onclick = () => {
+    document.querySelectorAll(".chip").forEach((x) => x.classList.remove("on"));
+    c.classList.add("on");
+    aspect = c.dataset.aspect;
+  };
 }
 
-$("#renderBtn").onclick = async () => {
-  const prompt = $("#prompt").value.trim();
-  if (!prompt) return toast("describe the shot first", true);
-  if (mode === "i2v" && !refData) return toast("i2v needs a reference frame", true);
-  const btn = $("#renderBtn"); btn.disabled = true;
+function handleFile(file) {
+  if (!file || !/^image\/(png|jpe?g)$/.test(file.type)) { toast("PNG or JPG only"); return; }
+  const img = new Image();
+  img.onload = () => {
+    const maxSide = 1536;
+    let w = img.width, h = img.height;
+    const k = Math.min(1, maxSide / Math.max(w, h));
+    w = Math.round(w * k); h = Math.round(h * k);
+    const cv = document.createElement("canvas");
+    cv.width = w; cv.height = h;
+    cv.getContext("2d").drawImage(img, 0, 0, w, h);
+    refMime = file.type === "image/png" ? "png" : "jpeg";
+    refB64 = cv.toDataURL(`image/${refMime}`, 0.92);
+    const di = $("dropImg");
+    di.src = refB64; di.style.display = "block";
+    $("dropTxt").textContent = `${w}×${h} start frame — click to replace`;
+  };
+  img.src = URL.createObjectURL(file);
+}
+$("drop").onclick = () => $("file").click();
+$("file").onchange = (e) => handleFile(e.target.files[0]);
+$("drop").addEventListener("dragover", (e) => { e.preventDefault(); $("drop").classList.add("over"); });
+$("drop").addEventListener("dragleave", () => $("drop").classList.remove("over"));
+$("drop").addEventListener("drop", (e) => {
+  e.preventDefault(); $("drop").classList.remove("over");
+  handleFile(e.dataTransfer.files[0]);
+});
+
+$("go").onclick = async () => {
+  const prompt = $("prompt").value.trim();
+  if (!prompt) { toast("Describe the shot first"); return; }
+  if (mode === "i2v" && !refB64) { toast("Pick a start frame for i2v"); return; }
+  const seed = $("seed").value.trim();
+  const body = { mode, prompt, aspect };
+  if (seed !== "") body.seed = Number(seed);
+  if (mode === "i2v") { body.ref_b64 = refB64; body.ref_mime = refMime; }
+  $("go").disabled = true;
   try {
-    await api("/api/jobs", { method:"POST", headers:{"content-type":"application/json"},
-      body: JSON.stringify({ mode, prompt, aspect, seed: $("#seed").value, audio: $("#audio").checked,
-        ref_b64: refData, ref_mime: refMime }) });
-    toast("queued on the exchange — wake the lane if it's sleeping");
-    $("#prompt").value = ""; $("#seed").value = ""; refresh();
-  } catch(e){ toast(e.message, true); }
-  btn.disabled = false;
+    const r = await fetch("/api/jobs", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok) {
+      toast("Queued — the lane wakes automatically when it's cold");
+      $("prompt").value = ""; $("seed").value = "";
+      refB64 = null; $("dropImg").style.display = "none";
+      $("dropTxt").textContent = "Drop a start frame here, or click to choose — PNG / JPG";
+      refresh();
+    } else toast(d.error || `Submit failed (${r.status})`);
+  } catch { toast("Network error — retry"); }
+  $("go").disabled = false;
 };
 
-$("#wakeBtn").onclick = async () => {
-  $("#wakeBtn").disabled = true;
-  try { const r = await api("/api/wake", { method:"POST" });
-    toast(r.detail || (r.already_waking ? "lane already waking" : "T4s booting"));
-  } catch(e){ toast(e.message, true); }
-  $("#wakeBtn").disabled = false; refresh();
-};
-
-const esc = (s) => (s||"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-function fmt(s){ if (!s) return ""; const m = Math.floor(s/60); return m ? `${m}m ${Math.round(s%60)}s` : `${Math.round(s)}s`; }
-function ago(ts){ return Math.max(0, Math.round(Date.now()/1000 - ts)); }
-
-async function refresh(){
-  let data;
-  try { data = await api("/api/jobs"); } catch(e){ if (e.message !== "locked") console.warn(e); return; }
-  const jobs = data.jobs || [];
-
-  const live = jobs.find(j => j.status === "RENDERING");
-  const lane = $("#laneDot"), laneTxt = $("#laneTxt");
-  if (live){ lane.className = "dot warm"; laneTxt.textContent = `rendering on ${live.gpu || "T4"} · ${fmt(live.elapsed_s)}`; }
-  else if (data.lane?.waking_recently){ lane.className = "dot warm"; laneTxt.textContent = "lane waking — T4s booting"; }
-  else if (jobs.find(j => j.status === "QUEUED")){ lane.className = "dot warm"; laneTxt.textContent = "queued — wake the lane"; }
-  else { lane.className = "dot idle"; laneTxt.textContent = "lane idle"; }
-
-  const active = jobs.filter(j => j.status === "QUEUED" || j.status === "RENDERING");
-  const done   = jobs.filter(j => j.status === "DONE");
-  $("#qN").textContent = active.length; $("#gN").textContent = done.length;
-
-  $("#queue").innerHTML = active.map(j => `
-    <div class="job">
-      <div class="thumb">${j.mode === "i2v" ? "🖼️" : "✍️"}</div>
-      <div class="meta">
-        <p>${esc(j.prompt) || j.id.slice(0,10)}</p>
-        <span>${j.id.slice(0,8)} · ${j.gpu || "unclaimed"} · ${j.status === "RENDERING" ? fmt(j.elapsed_s) : "waiting for a T4"}</span>
-        <div class="bar"><i style="width:${j.status === "RENDERING" ? Math.max(8, j.progress) : 4}%"></i></div>
-      </div>
-      <span class="badge b-${j.status}">${j.status}</span>
-    </div>`).join("") || `<div class="empty">nothing in the queue — submit a shot above</div>`;
-
-  $("#gallery").innerHTML = done.map(j => `
-    <div class="clip" onclick="play('${j.id}')">
-      <div class="ph"><img loading="lazy" src="${j.media.thumb}?pin=${pinQ()}" alt=""></div>
-      <div class="cap"><p>${esc(j.prompt) || j.id.slice(0,10)}</p><span>${fmt(j.elapsed_s)} · ${j.gpu || "T4"} · ${ago(j.updated_at)}s ago</span></div>
-    </div>`).join("") || `<div class="empty" style="grid-column:1/-1">no clips yet — the first render takes ~15–25 min (model download + 10-step pass)</div>`;
-
-  // toast on fresh completions
-  for (const j of done){ if (seen[j.id] === false){ toast("clip ready — check the gallery 🎬"); break; } }
-  jobs.forEach(j => seen[j.id] = (j.status === "DONE"));
+/* ── lane + gallery polling ── */
+function ago(ts) {
+  if (!ts) return "";
+  const s = Math.max(1, Math.round(Date.now() / 1000 - ts));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
 }
-window.play = async (id) => {
-  const data = await api("/api/jobs").catch(()=>null);
-  const j = data && data.jobs.find(x => x.id === id);
-  if (!j || !j.media) return;
-  $("#vid").src = j.media.video + "?pin=" + pinQ();
-  $("#dl").href = j.media.video + "?pin=" + pinQ();
-  $("#dl").setAttribute("download", `vidgen_${id}.mp4`);
-  $("#vidMeta").textContent = `${j.prompt || ""} — ${fmt(j.elapsed_s)} on ${j.gpu || "T4"}`;
-  $("#player").showModal();
-};
-function pinQ(){ const m = document.cookie.match(/vidgen_pin=([^;]+)/); return m ? decodeURIComponent(m[1]) : ""; }
+function esc(s) {
+  const d = document.createElement("div");
+  d.textContent = s || "";
+  return d.innerHTML;
+}
 
-setMode("t2v");
-refresh();
-setInterval(refresh, 5000);
+let laneCold = true;
+async function refresh() {
+  let d;
+  try {
+    const r = await fetch("/api/jobs");
+    if (r.status === 401) { location.reload(); return; }
+    d = await r.json();
+  } catch { return; }
+  if (!d || !d.jobs) return;
+
+  const dot = $("laneDot"), txt = $("laneTxt");
+  const busy = d.lane.rendering > 0 || d.lane.pending > 0;
+  if (d.lane.rendering > 0) { dot.className = "dot live"; txt.textContent = "rendering"; }
+  else if (d.lane.pending > 0) { dot.className = "dot warm"; txt.textContent = "queued — lane waking"; }
+  else if (d.lane.waking_recently) { dot.className = "dot warm"; txt.textContent = "lane warming up"; }
+  else { dot.className = "dot"; txt.textContent = "lane idle — submit to wake"; }
+  laneCold = !busy;
+
+  const active = d.jobs.filter((j) => j.status !== "DONE");
+  const q = $("queue");
+  if (!active.length) { q.innerHTML = '<div class="empty">No active jobs.</div>'; }
+  else {
+    q.innerHTML = active.map((j) => `
+      <div class="qitem">
+        <span class="qmode">${(j.mode || "?").toUpperCase()}</span>
+        <span class="qtext">${esc(j.prompt)}</span>
+        <span class="pill ${j.status}">${j.status}</span>
+        ${j.status === "RENDERING"
+          ? `<div class="qbar"><div style="width:${Math.max(4, j.progress || 4)}%"></div></div><span class="qpct">${j.progress || 0}%</span>`
+          : ""}
+      </div>`).join("");
+  }
+
+  const done = d.jobs.filter((j) => j.status === "DONE");
+  const g = $("gallery");
+  if (!done.length) { g.innerHTML = '<div class="empty">Nothing rendered yet.</div>'; return; }
+  let added = false;
+  for (const j of done) if (!seen.has(j.id)) { seen.add(j.id); added = true; }
+  if (added || g.querySelector(".empty")) {
+    g.innerHTML = done.map((j) => `
+      <div class="clip">
+        <video controls preload="metadata" poster="${j.media.thumb}?pin=${pinFromCookie()}"
+               src="${j.media.video}?pin=${pinFromCookie()}"></video>
+        <div class="cbody">
+          <div class="ctext">${esc(j.prompt)}</div>
+          <div class="cfoot">
+            <span>${(j.mode || "?").toUpperCase()}</span><span>${ago(j.updated_at)}</span>
+            <a href="${j.media.video}?pin=${pinFromCookie()}" download="vidgen_${j.id}.mp4">↓ mp4</a>
+          </div>
+        </div>
+      </div>`).join("");
+  }
+}
+function pinFromCookie() {
+  const m = document.cookie.match(/(?:^|;\s*)vidgen_pin=([^;]*)/);
+  return m ? decodeURIComponent(m[1]) : "";
+}
 </script>
 </body>
 </html>

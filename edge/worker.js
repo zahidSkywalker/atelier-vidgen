@@ -158,7 +158,7 @@ async function wakeKernel(request, env, url) {
     ok: true,
     version: data.versionNumber ?? null,
     url: data.url ?? null,
-    detail: "T4s booting — worker claims jobs in 3–8 min, first clip lands ~15–25 min after that",
+    detail: "T4s booting — ComfyUI + LTX-2.5 weights fetch on boot, worker claims jobs in ~10–15 min",
   });
 }
 
@@ -226,7 +226,7 @@ export default {
         if (!mode) return json({ error: "mode must be t2v or i2v" }, 400);
         const prompt = String(body.prompt || "").trim();
         if (!prompt) return json({ error: "prompt is required" }, 400);
-        if (prompt.length > 1200) return json({ error: "prompt too long (max 1200)" }, 400);
+        if (prompt.length > 2000) return json({ error: "prompt too long (max 2000)" }, 400);
         const aspect = body.aspect === "landscape" ? "landscape" : "portrait";
         let seed = null;
         if (body.seed !== undefined && body.seed !== null && String(body.seed) !== "") {
