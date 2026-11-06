@@ -251,36 +251,29 @@ def worker_loop(gpu_index: int) -> None:
                 pinger.set(40 + int(35 * (i + 1) / steps))
                 return {}
 
-            # progressive call: strip optional kwargs the pipeline build refuses
-            base = dict(kwargs)
-            base["callback_on_step_end"] = _step_cb
-            if len(prompt) < 200:
-                base["expand_prompts"] = True
-            base["image"] = None
+            # SINGLE introspected call — v2.1 lesson: each rejected pipe()
+            # attempt leaves its offload-moved modules resident, so retries
+            # pack the card and the real render OOMs. Filter kwargs by
+            # inspecting the signature BEFORE the first and only call.
+            import inspect
+            sig = inspect.signature(pipe.__call__).parameters
+            call = dict(kwargs)
+            if "callback_on_step_end" in sig:
+                call["callback_on_step_end"] = _step_cb
+            if "expand_prompts" in sig and len(prompt) < 200:
+                call["expand_prompts"] = True
             i2v = spec["mode"] == "i2v" and spec.get("ref_key_ext")
-            if i2v:
+            if i2v and "image" in sig:
                 from PIL import Image
                 img = Image.open(ref_local_path(jid, spec["ref_key_ext"])).convert("RGB")
-                base["image"] = img.resize((w, h), Image.LANCZOS)  # pre-fit: lighter VAE encode
-
-            out = None
-            for drop in ((), ("expand_prompts",), ("expand_prompts", "callback_on_step_end")):
-                call = {k: v for k, v in base.items() if k not in drop}
-                if not i2v or call.get("image") is None:
-                    call.pop("image", None)
-                try:
-                    out = pipe(**call)
-                    break
-                except TypeError as te:
-                    msg = str(te)
-                    print(f"[{gpu}] call rejected ({msg[:120]}) — retrying leaner", flush=True)
-                    if "image" in msg and i2v:
-                        print(f"[{gpu}] pipeline refused image= — falling back to T2V", flush=True)
-                        base.pop("image", None)
-                        i2v = False
-                    last_err = te
-            if out is None:
-                raise RuntimeError(f"pipeline call refused in all fallbacks: {last_err}")
+                call["image"] = img.resize((w, h), Image.LANCZOS)  # pre-fit: lighter VAE encode
+            elif i2v:
+                print(f"[{gpu}] pipeline has no image= param — falling back to T2V", flush=True)
+            missing = [k for k in ("height", "width", "num_frames", "num_inference_steps", "guidance_scale") if k not in sig]
+            if missing:
+                raise RuntimeError(f"pipeline signature lacks core kwargs: {missing}")
+            supported = {k: v for k, v in call.items() if k in sig}
+            out = pipe(**supported)
 
             frames = out.frames[0]
             audio_np = _audio_to_np(getattr(out, "audio", None))
