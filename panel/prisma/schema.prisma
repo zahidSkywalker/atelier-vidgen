@@ -1,0 +1,34 @@
+// Atelier VidGen — video generation panel
+// Kandinsky 6.0 Lite lane (Kaggle B), T2V + I2V
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Job {
+  id         String    @id @default(cuid())
+  mode       String // "t2v" | "i2v"
+  prompt     String
+  aspect     String    @default("portrait") // portrait 480x864 | landscape 864x480
+  seed       Int? // null = random
+  audio      Boolean   @default(true)
+  superRes   Boolean   @default(false) // Full-HD SR, M4
+  refImage   String? // public path of uploaded reference frame (i2v)
+  status     String    @default("QUEUED") // QUEUED | RENDERING | DONE | FAILED
+  progress   Int       @default(0) // 0-100
+  elapsedMs  Int       @default(0)
+  videoPath  String? // public path of finished mp4
+  thumbPath  String?
+  error      String?
+  gpu        String? // lane / card that rendered it
+  createdAt  DateTime  @default(now())
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  @@index([status, createdAt])
+}
