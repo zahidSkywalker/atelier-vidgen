@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Atelier VidGen</title>
+<meta name="theme-color" content="#0a0a0f">
+<style>
+  :root{
+    --bg:#0a0a0f; --bg2:#101018; --card:#14141d; --line:#23232f;
+    --amber:#f59e0b; --amber2:#fbbf24; --txt:#e8e8ef; --mut:#8b8b9e;
+    --green:#34d399; --red:#f87171; --blue:#60a5fa; --r:14px;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  html,body{background:var(--bg); color:var(--txt); font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  body{min-height:100vh; background:radial-gradient(1200px 500px at 50% -200px,#1a1430 0%,var(--bg) 60%)}
+  .wrap{max-width:1080px; margin:0 auto; padding:18px 16px 60px}
+  header{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:18px; flex-wrap:wrap}
+  .brand{display:flex; align-items:center; gap:10px}
+  .logo{width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,#f59e0b,#b45309);display:grid;place-items:center;font-size:20px}
+  h1{font-size:19px; letter-spacing:.3px}
+  h1 small{display:block;font-size:11.5px;color:var(--mut);font-weight:400;letter-spacing:.6px;text-transform:uppercase}
+  .lane{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--mut);background:var(--card);border:1px solid var(--line);padding:7px 12px;border-radius:999px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--mut)}
+  .dot.warm{background:var(--amber); box-shadow:0 0 8px var(--amber)}
+  .dot.idle{background:#3f3f50}
+  .tabs{display:grid; grid-template-columns:1fr 1fr; gap:8px; background:var(--bg2); border:1px solid var(--line); padding:6px; border-radius:12px; margin-bottom:14px}
+  .tab{border:0;background:transparent;color:var(--mut);padding:10px;border-radius:9px;font-weight:600;font-size:14px;cursor:pointer;transition:.15s}
+  .tab.on{background:var(--card);color:var(--amber2);box-shadow:0 1px 0 #ffffff12 inset}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px;margin-bottom:14px}
+  textarea{width:100%;min-height:96px;resize:vertical;background:var(--bg2);border:1px solid var(--line);border-radius:10px;color:var(--txt);padding:12px;font:inherit}
+  textarea:focus,input:focus,select:focus{outline:none;border-color:var(--amber)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+  .field{display:flex;flex-direction:column;gap:5px;flex:1;min-width:130px}
+  label{font-size:11.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.7px}
+  input,select{background:var(--bg2);border:1px solid var(--line);border-radius:10px;color:var(--txt);padding:10px 12px;font:inherit;width:100%}
+  .seg{display:flex;gap:6px}
+  .seg button{flex:1;background:var(--bg2);border:1px solid var(--line);color:var(--mut);padding:9px;border-radius:9px;cursor:pointer;font-weight:600;font-size:13px}
+  .seg button.on{border-color:var(--amber);color:var(--amber2);background:#f59e0b14}
+  .switch{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+  .switch input{display:none}
+  .knob{width:36px;height:20px;border-radius:999px;background:#2a2a38;position:relative;transition:.15s}
+  .knob::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#6b6b80;transition:.15s}
+  .switch input:checked + .knob{background:#f59e0b55}
+  .switch input:checked + .knob::after{left:18px;background:var(--amber2)}
+  .samples{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .samples button{background:var(--bg2);border:1px solid var(--line);color:var(--mut);font-size:12px;padding:6px 10px;border-radius:999px;cursor:pointer}
+  .samples button:hover{color:var(--amber2);border-color:var(--amber)}
+  .drop{margin-top:12px;border:1.5px dashed var(--line);border-radius:12px;padding:18px;text-align:center;color:var(--mut);font-size:13.5px;cursor:pointer;transition:.15s}
+  .drop.over{border-color:var(--amber);color:var(--amber2);background:#f59e0b0d}
+  .drop img{max-height:120px;border-radius:8px;display:block;margin:8px auto 0}
+  .render{width:100%;margin-top:14px;background:linear-gradient(135deg,#f59e0b,#d97706);border:0;color:#1a1205;font-weight:800;font-size:15px;padding:13px;border-radius:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px}
+  .render:disabled{opacity:.55;cursor:wait}
+  h2{font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin:22px 0 10px;display:flex;align-items:center;gap:8px}
+  h2 .n{background:var(--bg2);border:1px solid var(--line);border-radius:999px;padding:1px 9px;font-size:11px;color:var(--txt)}
+  .job{display:flex;gap:12px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px}
+  .job .thumb{width:74px;height:44px;border-radius:7px;background:var(--bg2);flex:none;display:grid;place-items:center;font-size:18px;overflow:hidden}
+  .job .meta{flex:1;min-width:0}
+  .job .meta p{font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--txt)}
+  .job .meta span{font-size:11.5px;color:var(--mut)}
+  .badge{font-size:10.5px;font-weight:700;letter-spacing:.5px;padding:3px 9px;border-radius:999px;flex:none}
+  .b-QUEUED{background:#f59e0b1c;color:var(--amber2)}
+  .b-RENDERING{background:#60a5fa1c;color:var(--blue)}
+  .b-DONE{background:#34d3991c;color:var(--green)}
+  .b-FAILED{background:#f871711c;color:var(--red)}
+  .bar{height:4px;background:var(--bg2);border-radius:99px;margin-top:7px;overflow:hidden}
+  .bar i{display:block;height:100%;background:linear-gradient(90deg,#f59e0b,#fbbf24);border-radius:99px;transition:width .6s}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+  .clip{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;cursor:pointer;transition:.15s}
+  .clip:hover{border-color:#f59e0b66;transform:translateY(-2px)}
+  .clip .ph{aspect-ratio:16/9;background:var(--bg2);display:grid;place-items:center}
+  .clip .ph img{width:100%;height:100%;object-fit:cover}
+  .clip .cap{padding:10px 12px}
+  .clip .cap p{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .clip .cap span{font-size:11px;color:var(--mut)}
+  .empty{color:var(--mut);font-size:13.5px;text-align:center;padding:26px;border:1px dashed var(--line);border-radius:12px}
+  dialog{background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:16px;padding:14px;max-width:min(92vw,760px)}
+  dialog::backdrop{background:#000a}
+  dialog video{width:100%;border-radius:10px;background:#000;max-height:70vh}
+  dialog .drow{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}
+  dialog a{color:var(--amber2);font-size:13.5px;text-decoration:none;border:1px solid var(--line);padding:7px 12px;border-radius:9px}
+  .wake{background:var(--bg2);border:1px solid var(--line);color:var(--amber2);font-size:12.5px;font-weight:700;padding:8px 14px;border-radius:999px;cursor:pointer}
+  .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(80px);background:#1c1c28;border:1px solid var(--line);color:var(--txt);padding:11px 18px;border-radius:12px;font-size:13.5px;transition:.25s;max-width:90vw;z-index:9}
+  .toast.show{transform:translateX(-50%) translateY(0)}
+  .toast.err{border-color:#f8717155}
+  /* PIN gate */
+  .gate{position:fixed;inset:0;background:var(--bg);display:grid;place-items:center;z-index:10}
+  .gate .box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px;width:min(90vw,340px);text-align:center}
+  .gate input{text-align:center;letter-spacing:6px;font-size:20px;margin:14px 0}
+  .gate button{width:100%;background:var(--amber);border:0;color:#1a1205;font-weight:800;padding:11px;border-radius:10px;cursor:pointer}
+  @media (max-width:560px){ .grid{grid-template-columns:1fr 1fr} h1{font-size:16px} }
+</style>
+</head>
+<body>
+<div class="gate" id="gate" style="display:none">
+  <div class="box">
+    <div class="logo" style="margin:0 auto 10px">🎬</div>
+    <h1 style="font-size:16px">Atelier VidGen</h1>
+    <p style="color:var(--mut);font-size:12.5px;margin-top:4px">enter panel PIN</p>
+    <input id="pin" type="password" inputmode="numeric" maxlength="8" placeholder="••••">
+    <button id="knockBtn">Unlock</button>
+    <p id="gateErr" style="color:var(--red);font-size:12px;margin-top:9px;min-height:15px"></p>
+  </div>
+</div>
+
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">🎬</div>
+      <h1>Atelier VidGen<small>Kandinsky 6.0 Lite · 2× Tesla T4 · 5 s clip + audio</small></h1>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <div class="lane"><span class="dot idle" id="laneDot"></span><span id="laneTxt">lane idle</span></div>
+      <button class="wake" id="wakeBtn" title="Boot the GPU worker session on Kaggle (dual T4)">⚡ Wake lane</button>
+    </div>
+  </header>
+
+  <div class="tabs">
+    <button class="tab on" id="tabT2V">✍️&nbsp; Text → Video</button>
+    <button class="tab" id="tabI2V">🖼️&nbsp; Image → Video</button>
+  </div>
+
+  <div class="card">
+    <textarea id="prompt" maxlength="1200" placeholder="Describe the shot — camera move, light, mood… and the sound."></textarea>
+    <div class="samples">
+      <button data-p="Cinematic shot: a lone lighthouse on a stormy cliff at dusk, waves exploding against black rock, the beam sweeping through sea fog. Camera slowly pushes in from a low angle. Photoreal, moody teal and amber grade, rain streaks. Audio: crashing waves, deep wind howl, distant thunder. No dialogue, text, or logos.">🗼 Lighthouse</button>
+      <button data-p="Cinematic shot: neon rain over an empty night market, reflections rippling in puddles, steam curling from food stalls. Slow dolly forward, shallow depth of field. Audio: soft rain, buzzing neon, distant sizzle. No dialogue, text, or logos.">🏮 Neon market</button>
+      <button data-p="Cinematic shot: a red dragon wakes on a mound of gold coins in a sunlit cave, slowly unfolds its wings. Camera pushes in toward its eyes. Photoreal fantasy, warm golden light, dust motes. Audio: deep rumbling breath, clinking coins, distant roar. No dialogue, text, or logos.">🐉 Dragon</button>
+      <button data-p="Golden hour drone shot flying over a misty pine forest, sun rays cutting through fog between the trees. Smooth forward glide. Audio: wind, birdsong, warm ambient drone. No dialogue, text, or logos.">🌲 Forest drone</button>
+    </div>
+    <div class="drop" id="drop" style="display:none">
+      <span id="dropTxt">drop the reference frame here — it becomes the first frame</span>
+      <img id="dropPrev" style="display:none">
+    </div>
+    <input type="file" id="file" accept="image/png,image/jpeg" style="display:none">
+    <div class="row">
+      <div class="field" style="max-width:220px">
+        <label>Aspect</label>
+        <div class="seg">
+          <button id="asP" class="on">9:16 · 480×864</button>
+          <button id="asL">16:9 · 864×480</button>
+        </div>
+      </div>
+      <div class="field" style="max-width:160px">
+        <label>Seed (blank = random)</label>
+        <input id="seed" type="number" min="0" max="4294967295" placeholder="random">
+      </div>
+      <div class="field" style="max-width:150px;justify-content:flex-end">
+        <label>Synced audio</label>
+        <label class="switch"><input type="checkbox" id="audio" checked><span class="knob"></span><span style="font-size:12.5px;color:var(--mut)">44 kHz</span></label>
+      </div>
+    </div>
+    <button class="render" id="renderBtn">🎬 Render clip</button>
+  </div>
+
+  <h2>Render queue <span class="n" id="qN">0</span></h2>
+  <div id="queue"></div>
+
+  <h2>Gallery <span class="n" id="gN">0</span></h2>
+  <div class="grid" id="gallery"></div>
+</div>
+
+<dialog id="player">
+  <video id="vid" controls autoplay loop></video>
+  <div class="drow">
+    <p id="vidMeta" style="font-size:12px;color:var(--mut);flex:1"></p>
+    <a id="dl" download>⬇ mp4</a>
+    <button class="wake" onclick="document.getElementById('player').close()">Close</button>
+  </div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let mode = "t2v", aspect = "portrait", refData = null, refMime = null, seen = {};
+
+function toast(msg, err){ const t = $("#toast"); t.textContent = msg; t.className = "toast show" + (err ? " err" : ""); setTimeout(()=>t.className="toast"+(err?" err":""), 4200); }
+
+async function api(path, opts={}){
+  const r = await fetch(path, opts);
+  if (r.status === 401){ $("#gate").style.display = "grid"; throw new Error("locked"); }
+  const j = await r.json().catch(()=>({error:"bad response"}));
+  if (!r.ok) throw new Error(j.error + (j.detail ? " — "+j.detail : ""));
+  return j;
+}
+
+$("#knockBtn").onclick = knock;
+$("#pin").addEventListener("keydown", e => { if (e.key === "Enter") knock(); });
+async function knock(){
+  try {
+    await api("/api/knock", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({pin: $("#pin").value}) });
+    $("#gate").style.display = "none"; refresh();
+  } catch(e){ $("#gateErr").textContent = e.message === "locked" ? "" : e.message; }
+}
+
+$("#tabT2V").onclick = () => setMode("t2v");
+$("#tabI2V").onclick = () => setMode("i2v");
+function setMode(m){
+  mode = m;
+  $("#tabT2V").classList.toggle("on", m==="t2v");
+  $("#tabI2V").classList.toggle("on", m==="i2v");
+  $("#drop").style.display = m==="i2v" ? "block" : "none";
+}
+$("#asP").onclick = () => { aspect="portrait"; $("#asP").classList.add("on"); $("#asL").classList.remove("on"); };
+$("#asL").onclick = () => { aspect="landscape"; $("#asL").classList.add("on"); $("#asP").classList.remove("on"); };
+document.querySelectorAll(".samples button").forEach(b => b.onclick = () => { $("#prompt").value = b.dataset.p; if (mode==="i2v") setMode("t2v"); });
+
+const drop = $("#drop"), file = $("#file");
+drop.onclick = () => file.click();
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files[0]) loadRef(e.dataTransfer.files[0]); };
+file.onchange = () => { if (file.files[0]) loadRef(file.files[0]); };
+function loadRef(f){
+  if (!/^image\/(png|jpe?g)$/.test(f.type)) return toast("png / jpeg only", true);
+  const r = new FileReader();
+  r.onload = () => { refData = r.result; refMime = f.type;
+    $("#dropPrev").src = r.result; $("#dropPrev").style.display = "block";
+    $("#dropTxt").textContent = "reference frame ready — tap to change"; };
+  r.readAsDataURL(f);
+}
+
+$("#renderBtn").onclick = async () => {
+  const prompt = $("#prompt").value.trim();
+  if (!prompt) return toast("describe the shot first", true);
+  if (mode === "i2v" && !refData) return toast("i2v needs a reference frame", true);
+  const btn = $("#renderBtn"); btn.disabled = true;
+  try {
+    await api("/api/jobs", { method:"POST", headers:{"content-type":"application/json"},
+      body: JSON.stringify({ mode, prompt, aspect, seed: $("#seed").value, audio: $("#audio").checked,
+        ref_b64: refData, ref_mime: refMime }) });
+    toast("queued on the exchange — wake the lane if it's sleeping");
+    $("#prompt").value = ""; $("#seed").value = ""; refresh();
+  } catch(e){ toast(e.message, true); }
+  btn.disabled = false;
+};
+
+$("#wakeBtn").onclick = async () => {
+  $("#wakeBtn").disabled = true;
+  try { const r = await api("/api/wake", { method:"POST" });
+    toast(r.detail || (r.already_waking ? "lane already waking" : "T4s booting"));
+  } catch(e){ toast(e.message, true); }
+  $("#wakeBtn").disabled = false; refresh();
+};
+
+const esc = (s) => (s||"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function fmt(s){ if (!s) return ""; const m = Math.floor(s/60); return m ? `${m}m ${Math.round(s%60)}s` : `${Math.round(s)}s`; }
+function ago(ts){ return Math.max(0, Math.round(Date.now()/1000 - ts)); }
+
+async function refresh(){
+  let data;
+  try { data = await api("/api/jobs"); } catch(e){ if (e.message !== "locked") console.warn(e); return; }
+  const jobs = data.jobs || [];
+
+  const live = jobs.find(j => j.status === "RENDERING");
+  const lane = $("#laneDot"), laneTxt = $("#laneTxt");
+  if (live){ lane.className = "dot warm"; laneTxt.textContent = `rendering on ${live.gpu || "T4"} · ${fmt(live.elapsed_s)}`; }
+  else if (data.lane?.waking_recently){ lane.className = "dot warm"; laneTxt.textContent = "lane waking — T4s booting"; }
+  else if (jobs.find(j => j.status === "QUEUED")){ lane.className = "dot warm"; laneTxt.textContent = "queued — wake the lane"; }
+  else { lane.className = "dot idle"; laneTxt.textContent = "lane idle"; }
+
+  const active = jobs.filter(j => j.status === "QUEUED" || j.status === "RENDERING");
+  const done   = jobs.filter(j => j.status === "DONE");
+  $("#qN").textContent = active.length; $("#gN").textContent = done.length;
+
+  $("#queue").innerHTML = active.map(j => `
+    <div class="job">
+      <div class="thumb">${j.mode === "i2v" ? "🖼️" : "✍️"}</div>
+      <div class="meta">
+        <p>${esc(j.prompt) || j.id.slice(0,10)}</p>
+        <span>${j.id.slice(0,8)} · ${j.gpu || "unclaimed"} · ${j.status === "RENDERING" ? fmt(j.elapsed_s) : "waiting for a T4"}</span>
+        <div class="bar"><i style="width:${j.status === "RENDERING" ? Math.max(8, j.progress) : 4}%"></i></div>
+      </div>
+      <span class="badge b-${j.status}">${j.status}</span>
+    </div>`).join("") || `<div class="empty">nothing in the queue — submit a shot above</div>`;
+
+  $("#gallery").innerHTML = done.map(j => `
+    <div class="clip" onclick="play('${j.id}')">
+      <div class="ph"><img loading="lazy" src="${j.media.thumb}?pin=${pinQ()}" alt=""></div>
+      <div class="cap"><p>${esc(j.prompt) || j.id.slice(0,10)}</p><span>${fmt(j.elapsed_s)} · ${j.gpu || "T4"} · ${ago(j.updated_at)}s ago</span></div>
+    </div>`).join("") || `<div class="empty" style="grid-column:1/-1">no clips yet — the first render takes ~15–25 min (model download + 10-step pass)</div>`;
+
+  // toast on fresh completions
+  for (const j of done){ if (seen[j.id] === false){ toast("clip ready — check the gallery 🎬"); break; } }
+  jobs.forEach(j => seen[j.id] = (j.status === "DONE"));
+}
+window.play = async (id) => {
+  const data = await api("/api/jobs").catch(()=>null);
+  const j = data && data.jobs.find(x => x.id === id);
+  if (!j || !j.media) return;
+  $("#vid").src = j.media.video + "?pin=" + pinQ();
+  $("#dl").href = j.media.video + "?pin=" + pinQ();
+  $("#dl").setAttribute("download", `vidgen_${id}.mp4`);
+  $("#vidMeta").textContent = `${j.prompt || ""} — ${fmt(j.elapsed_s)} on ${j.gpu || "T4"}`;
+  $("#player").showModal();
+};
+function pinQ(){ const m = document.cookie.match(/vidgen_pin=([^;]+)/); return m ? decodeURIComponent(m[1]) : ""; }
+
+setMode("t2v");
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
