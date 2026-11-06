@@ -6,10 +6,12 @@ Runs on Kaggle (account B, xion678) T4 session. Polls the R2 exchange for
 queued jobs, claims them (delete-as-claim), renders 5 s clips with the
 Kandinsky-6.0-Lite-distill Diffusers pipeline, publishes mp4 + thumb back.
 
-Dual-T4 policy (sir's directive): with 2 visible GPUs we spawn TWO worker
-processes, one per card (CUDA_VISIBLE_DEVICES pinned) — 2x queue throughput.
-Model-parallel split was rejected: a 3B model fits one 16 GB card, and
-cross-card pipeline sync would add overhead without a throughput win.
+Dual-T4 policy v5: ONE renderer process. v4 ran one worker per card; each
+holds a ~15 GB resident pipeline in system RAM, the T4x2 box has 29 GB, and
+the second load triggered the kernel OOM-killer which SIGKILL'd the sibling
+mid-load (frozen at its pre-load pinger mark, no traceback). RAM — not VRAM —
+is the ceiling. Jobs render strictly serially on card 0; card 1 stays on
+standby for a future streaming/smaller-weights path.
 
 Quota discipline:
   - exits when the queue stays empty for IDLE_EXIT_MIN minutes
@@ -22,6 +24,13 @@ T4 (sm75) notes:
     lossless; fp16 overflow guards live in the output sanity check).
   - No FlashAttention/SageAttention → SDPA math backend, slower but correct.
   - Output guard rejects NaN / all-black frames instead of publishing them.
+
+v2.5 changelog:
+  - single renderer process (RAM ceiling — see policy note above)
+  - sequential cpu offload first in the ladder; model cpu offload demoted to
+    fallback (proven silently ignored by Kandinsky6TI2VAPipeline in v1 and
+    v4: its internals move the whole suite to VRAM → 14.5 GiB resident →
+    i2v CUDA OOM)
 """
 import os
 import subprocess
@@ -146,16 +155,19 @@ def load_pipeline(gpu: str):
             m = getattr(pipe, comp, None)
             if m is not None:
                 m.to(torch.float32)
-        # memory ladder: model offload → (verify residency) → sequential → last resort all-GPU.
-        # v1 lesson: a silently-ignored offload left 14.2 GiB resident and OOM'd the i2v path.
+        # memory ladder v5: sequential offload FIRST — enable_model_cpu_offload
+        # is silently ignored by Kandinsky6TI2VAPipeline (v1 AND v4 post-mortems:
+        # its internals move the whole suite to VRAM, 14.5 GiB resident, i2v
+        # OOM). Accelerate's per-layer hooks always work. all-GPU is the very
+        # last resort and effectively never viable on a 16 GB card.
         strategy = "all-gpu"
-        for fn in ("enable_model_cpu_offload", "enable_sequential_cpu_offload"):
+        for fn, limit in (("enable_sequential_cpu_offload", 1.0), ("enable_model_cpu_offload", 4.0)):
             try:
                 getattr(pipe, fn)()
                 torch.cuda.synchronize()
                 resident = torch.cuda.memory_allocated() / 2**30
                 print(f"[{gpu}] {fn}: resident after apply = {resident:.2f} GiB", flush=True)
-                if resident < 4.0:
+                if resident < limit:
                     strategy = fn
                     break
                 print(f"[{gpu}] {fn} ignored by pipeline (still resident) — escalating", flush=True)
@@ -360,20 +372,14 @@ def main() -> None:
     print(f"[vidgen] {n_gpus} CUDA device(s) visible", flush=True)
     if n_gpus == 0:
         raise SystemExit("No CUDA device — attach a GPU accelerator to this kernel.")
-    if n_gpus == 1:
-        worker_loop(0)
-        return
-    import multiprocessing as mp
-    # spawn (not fork): parent touched CUDA via device_count; forked children
-    # would die with "Cannot re-initialize CUDA in forked subprocess"
-    mp.set_start_method("spawn", force=True)
-    procs = []
-    for i in range(min(n_gpus, 2)):  # dual-T4: one worker per card
-        p = mp.Process(target=worker_loop, args=(i,))
-        p.start()
-        procs.append(p)
-    for p in procs:
-        p.join()
+    # v5 post-mortem: dual in-process workers each hold a ~15 GB resident
+    # pipeline; the T4x2 box has 29 GB RAM, so when card 1 loaded while card 0
+    # still held its pipeline, the kernel OOM-killer SIGKILL'd card 0 mid-load
+    # (frozen at the pre-load pinger mark, no traceback). RAM, not VRAM, is
+    # the ceiling — so ONE renderer process, jobs strictly serial, card 1 on
+    # standby for a future smaller-weights path.
+    print(f"[vidgen] v5: single renderer mode (RAM ceiling) — card 1+ standby", flush=True)
+    worker_loop(0)
 
 
 if __name__ == "__main__":
