@@ -226,6 +226,8 @@ export default {
         if (!prompt) return json({ error: "prompt is required" }, 400);
         if (prompt.length > 2000) return json({ error: "prompt too long (max 2000)" }, 400);
         const aspect = body.aspect === "landscape" ? "landscape" : "portrait";
+        const duration_s = body.duration_s === undefined || body.duration_s === null || body.duration_s === "" ? 5 : Number(body.duration_s);
+        if (![5, 15].includes(duration_s)) return json({ error: "duration_s must be 5 or 15" }, 400);
         let seed = null;
         if (body.seed !== undefined && body.seed !== null && String(body.seed) !== "") {
           const n = Number(body.seed);
@@ -234,7 +236,7 @@ export default {
         }
         const audio = body.audio === false ? false : true;
         const id = crypto.randomUUID().replace(/-/g, "").slice(0, 24);
-        const spec = { id, mode, prompt, aspect, seed, audio, super_res: false, created_at: new Date().toISOString() };
+        const spec = { id, mode, prompt, aspect, duration_s, seed, audio, super_res: false, created_at: new Date().toISOString() };
         await env.CTRL.put(`${PREFIX}/jobs/${id}/job.json`, JSON.stringify(spec), {
           httpMetadata: { contentType: "application/json" },
         });
@@ -251,7 +253,7 @@ export default {
           });
         }
         await env.CTRL.put(`${PREFIX}/edge_index/${id}.json`, JSON.stringify({
-          prompt, mode, aspect, audio, created_at: spec.created_at,
+          prompt, mode, aspect, duration_s, audio, created_at: spec.created_at,
         }), { httpMetadata: { contentType: "application/json" } });
         return json({ ok: true, id, detail: "queued on the exchange" });
       }

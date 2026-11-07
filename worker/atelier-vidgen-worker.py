@@ -1,31 +1,40 @@
 #!/usr/bin/env python3
 """
-Atelier VidGen — Kaggle GPU worker kernel (LTX-2.5 22B distilled, GGUF).
+Atelier VidGen — Kaggle GPU worker kernel (LTX-2.5 22B distilled, GGUF) — v7.
 
+v7 = dual-lane orchestrator + 15s combined mode (TASK-20261107-04, sir approved).
 Engine : LTX-2.5 22B audio-video DiT, distilled variant, Unsloth UD-Q4_K_XL GGUF
          (13.0 GB, VRAM-resident on a T4 — no offload crawl).
-Stack  : ComfyUI @ 2f35f4a08 + city96/ComfyUI-GGUF @ 6ea2651e, headless,
+Stack  : ComfyUI @ 2f35f4a08 + city96/ComfyUI-GGUF @ 6ea2651e
+         + pollockjj/ComfyUI-MultiGPU (DisTorch2, pinned rev), headless,
          driven over the local HTTP API with a programmatic workflow graph
          cloned from the official Comfy-Org LTX-2.5 templates.
+Lanes  : lane0 = ComfyUI on card 0 (sees both cards — hosts the 15s split
+         graph), lane1 = ComfyUI on card 1 (5s overflow lane). Regular 5s
+         jobs run two parallel lanes; a 15s job runs alone across both
+         cards (DiT cuda:0, TE+VAE cuda:1 via DisTorch2, overflow streams
+         over PCIe — never CPU/RAM offload). Single-GPU boxes degrade to
+         lane0 only.
 Files  : all weights fetched from unsloth/LTX-2.5-GGUF (ungated mirror):
            distilled/ltx-2.5-22b-distilled-UD-Q4_K_XL.gguf
            text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors
            vae/ltx-2.5-video-vae-conv-bf16.safetensors   (low-memory conv VAE)
            vae/ltx-2.5-audio-vae-bf16.safetensors
            latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0
-Policy : ONE renderer process / card 0. The gemma-12B text encoder (fp16
-         ~13 GB in system RAM) plus ComfyUI overhead eat most of the T4x2
-         box's 29 GB RAM ceiling — a second instance would re-run the v4
-         OOM-killer incident. Sampling is two-stage (8 base steps + 3 refine
-         steps at 2x latent upscale, euler_ancestral, dual-CFG 1/1, distilled
-         schedules baked into ManualSigmas) — on CUDA OOM the job retries
-         once single-stage at full resolution.
+Policy : gemma-12B TE is recast to ComfyUI mixed-ops fp8q on boot (v18
+         lesson: bf16 TE sits exactly on the 29 GB RAM cgroup edge; fp8q
+         halves resident weights, dequant per-op in fp16 is Turing-safe).
+         Sampling is two-stage (8 base steps + 3 refine steps at 2x latent
+         upscale, euler_ancestral, dual-CFG 1/1, distilled schedules baked
+         into ManualSigmas). On CUDA OOM a 15s job retries once at a
+         dropped resolution bucket (864x480 -> 720x400 class).
 Quota  : exits when the queue stays empty for IDLE_EXIT_MIN minutes; hard
          stop at MAX_SESSION_MIN minutes. Heartbeats every 60 s.
 Creds  : dataset jahidul007/vidgen-config → vidgen_runtime.env (+ vidgen_exchange.py).
 """
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -77,12 +86,12 @@ except ImportError:
     raise SystemExit("vidgen_exchange.py not found — bundle it into jahidul007/vidgen-config")
 
 T0 = time.time()
-API = "http://127.0.0.1:8188"
 
 BASE = "/kaggle/temp/comfy"
 COMFY_DIR = f"{BASE}/ComfyUI"
 COMFY_REV = "2f35f4a08176d993cded35dac3332be4f7287f41"
 GGUF_PLUGIN_REV = "6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
+MGPU_PLUGIN_REV = "37a73feda5804045e4f39d8c640905d62a2169d1"
 
 HF_REPO = "unsloth/LTX-2.5-GGUF"
 GGUF_NAME = "ltx-2.5-22b-distilled-UD-Q4_K_XL.gguf"
@@ -99,9 +108,9 @@ NEGATIVE = "pc game, console game, video game, cartoon, childish, ugly"
 SIGMAS_BASE = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"  # 8 steps
 SIGMAS_REFINE = "0.85, 0.7250, 0.4219, 0.0"                                            # 3 steps
 FPS = 24
-DURATION_S = 5
-FRAMES = DURATION_S * FPS + 1  # 121 (8n+1)
+DURATIONS = (5, 15)
 ASPECTS = {"landscape": (864, 480), "portrait": (480, 864)}
+OOM_ASPECTS = {"landscape": (720, 400), "portrait": (400, 720)}  # dropped bucket (v7 fallback)
 
 TE_LOADED_NAME = TE_NAME  # switched to the fp8q variant after boot conversion
 
@@ -249,7 +258,6 @@ print(f"fp8q ok: {len(entries)} tensors ({nq} quantized), {size / 2**30:.2f} GB"
 '''
 
 
-
 def log(msg: str) -> None:
     print(f"[vidgen {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -263,6 +271,15 @@ def sh(cmd: str) -> None:
 def install_deps() -> None:
     log("installing deps…")
     sh("pip install -q boto3 'huggingface_hub[hf_transfer]' gguf av einops sentencepiece 2>&1 | tail -1 || true")
+
+
+def gpu_count() -> int:
+    try:
+        r = subprocess.run("nvidia-smi --list-gpus | wc -l", shell=True,
+                           capture_output=True, text=True, executable="/bin/bash", timeout=15)
+        return max(1, int(r.stdout.strip() or "1"))
+    except Exception:
+        return 1
 
 
 def hf_download(sub: str, name: str, dest_dir: str) -> str:
@@ -294,6 +311,12 @@ def setup_comfy() -> None:
     sh(f"git -C {plugin} fetch -q origin {GGUF_PLUGIN_REV} 2>/dev/null || true")
     sh(f"git -C {plugin} checkout -q --force {GGUF_PLUGIN_REV}")
 
+    mgpu = f"{COMFY_DIR}/custom_nodes/ComfyUI-MultiGPU"
+    if not os.path.exists(mgpu):
+        sh(f"git clone -q https://github.com/pollockjj/ComfyUI-MultiGPU.git {mgpu}")
+    sh(f"git -C {mgpu} fetch -q origin {MGPU_PLUGIN_REV} 2>/dev/null || true")
+    sh(f"git -C {mgpu} checkout -q --force {MGPU_PLUGIN_REV}")
+
     log("installing ComfyUI requirements…")
     sh(f"pip install -q -r {COMFY_DIR}/requirements.txt 2>&1 | tail -1 || true")
     sh(f"pip install -q -r {plugin}/requirements.txt 2>&1 | tail -1 || true")
@@ -306,7 +329,7 @@ def setup_comfy() -> None:
     hf_download(UP_SUB, UP_NAME, f"{COMFY_DIR}/models/latent_upscale_models")
 
 
-COMFY_PROC = None
+COMFY_PROCS = {}
 
 
 def setup_swap() -> None:
@@ -336,44 +359,47 @@ def probe_te_keys() -> None:
         log(f"TE probe failed: {e}")
 
 
-def start_comfy() -> None:
-    global COMFY_PROC
+def start_comfy_lane(tag: str, port: int, cuda_devices: str) -> None:
+    """Launch one ComfyUI lane process and wait for its API."""
     env = dict(os.environ)
-    env["CUDA_VISIBLE_DEVICES"] = "0"
+    env["CUDA_VISIBLE_DEVICES"] = cuda_devices
     env.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
-    logfile = open(f"{BASE}/comfyui.log", "a")
+    logfile = open(f"{BASE}/comfyui_{tag}.log", "a")
     # --disable-dynamic-vram + --cache-none: the fp8q TE (~half of 24.5 GiB)
-    # full-loads to RAM, cache-none frees it before the 13 GiB GGUF DiT loads
-    # to card 0. Never both at once, nothing staged to disk.
+    # full-loads to RAM, cache-none frees it before the 13 GiB GGUF DiT loads.
+    # Never both at once, nothing staged to disk — keeps two lanes inside the
+    # 29 GiB cgroup (the v4 OOM-killer lesson, re-checked for v7 dual-lane).
     cmd = [sys.executable, "main.py",
-           "--port", "8188", "--listen", "127.0.0.1",
+           "--port", str(port), "--listen", "127.0.0.1",
            "--lowvram", "--disable-dynamic-vram", "--cache-none", "--force-fp16",
            "--preview-method", "none", "--disable-auto-launch"]
-    log(f"launching ComfyUI: {' '.join(cmd[2:])}")
-    COMFY_PROC = subprocess.Popen(cmd, cwd=COMFY_DIR, env=env,
-                                  stdout=logfile, stderr=subprocess.STDOUT)
+    log(f"launching ComfyUI {tag} (port {port}, cuda {cuda_devices})")
+    proc = subprocess.Popen(cmd, cwd=COMFY_DIR, env=env,
+                            stdout=logfile, stderr=subprocess.STDOUT)
+    COMFY_PROCS[tag] = (proc, port)
+    api = f"http://127.0.0.1:{port}"
     deadline = time.time() + 25 * 60
     while time.time() < deadline:
-        if COMFY_PROC.poll() is not None:
-            sh(f"tail -40 {BASE}/comfyui.log > {BASE}/comfyui_tail.txt 2>/dev/null || true")
-            raise SystemExit(f"ComfyUI exited early (rc={COMFY_PROC.returncode}) — see comfyui.log tail")
+        if proc.poll() is not None:
+            sh(f"tail -40 {BASE}/comfyui_{tag}.log > {BASE}/comfyui_{tag}_tail.txt 2>/dev/null || true")
+            raise SystemExit(f"ComfyUI {tag} exited early (rc={proc.returncode}) — see log tail")
         try:
-            with urllib.request.urlopen(f"{API}/system_stats", timeout=5) as r:
+            with urllib.request.urlopen(f"{api}/system_stats", timeout=5) as r:
                 stats = json.loads(r.read())
-            log(f"ComfyUI up: {stats.get('system', {}).get('comfyui_version', '?')}")
+            log(f"ComfyUI {tag} up: {stats.get('system', {}).get('comfyui_version', '?')}")
             return
         except Exception:
             time.sleep(5)
-    raise SystemExit("ComfyUI did not come up in 25 minutes")
+    raise SystemExit(f"ComfyUI {tag} did not come up in 25 minutes")
 
 
-def object_info() -> dict:
-    with urllib.request.urlopen(f"{API}/object_info", timeout=60) as r:
+def object_info(api: str) -> dict:
+    with urllib.request.urlopen(f"{api}/object_info", timeout=60) as r:
         return json.loads(r.read())
 
 
-def api_post(path: str, payload: dict) -> dict:
-    req = urllib.request.Request(f"{API}{path}", data=json.dumps(payload).encode(),
+def api_post(api: str, path: str, payload: dict) -> dict:
+    req = urllib.request.Request(f"{api}{path}", data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.loads(r.read())
@@ -382,10 +408,16 @@ def api_post(path: str, payload: dict) -> dict:
 # ────────────────────────── workflow graph builder ──────────────────────────
 
 def build_graph(mode: str, prompt: str, width: int, height: int, seed: int,
-                ref_file: str, jid: str, stage: str = "two") -> dict:
+                ref_file: str, jid: str, stage: str = "two",
+                duration_s: int = 5, split: bool = False) -> dict:
     """API-format graph cloned from the official Comfy-Org LTX-2.5 templates.
     stage='two' → 8 base steps at W/2×H/2 + latent 2x upsample + 3 refine steps.
-    stage='one' → OOM fallback: 8 base steps directly at W×H."""
+    stage='one' → OOM fallback: 8 base steps directly at W×H.
+    duration_s  → 5 (121 frames) or 15 (361 frames); 8n+1 constraint.
+    split=True  → DisTorch2 combined mode: DiT resident on cuda:0 with PCIe
+                  streaming from cuda:1, TE + VAEs resident on cuda:1
+                  (15s jobs own both cards; v7 TASK-20261107-04)."""
+    frames = duration_s * FPS + 1  # 8n+1
     g = {}
     n = [0]
 
@@ -402,14 +434,33 @@ def build_graph(mode: str, prompt: str, width: int, height: int, seed: int,
 
     C = lambda nid, slot=0: [nid, slot]
 
-    clip = node("CLIPLoader", widgets=[("clip_name", TE_LOADED_NAME), ("type", "ltxv"), ("device", "default")])
+    if split:
+        clip = node("CLIPLoaderDisTorch2MultiGPU",
+                    inputs={"compute_device": "cuda:1", "virtual_vram_gb": 14.0,
+                            "donor_device": "cpu"},
+                    widgets=[("clip_name", TE_LOADED_NAME), ("type", "ltxv")])
+        unet = node("UnetLoaderGGUFDisTorch2MultiGPU",
+                    inputs={"compute_device": "cuda:0", "virtual_vram_gb": 13.0,
+                            "donor_device": "cuda:1"},
+                    widgets=[("unet_name", GGUF_NAME)])
+        vvae = node("VAELoaderDisTorch2MultiGPU",
+                    inputs={"compute_device": "cuda:1", "virtual_vram_gb": 13.5,
+                            "donor_device": "cpu"},
+                    widgets=[("vae_name", VVAE_NAME)])
+        avae = node("VAELoaderDisTorch2MultiGPU",
+                    inputs={"compute_device": "cuda:1", "virtual_vram_gb": 13.5,
+                            "donor_device": "cpu"},
+                    widgets=[("vae_name", AVAE_NAME)])
+    else:
+        clip = node("CLIPLoader", widgets=[("clip_name", TE_LOADED_NAME), ("type", "ltxv"), ("device", "default")])
+        unet = node("UnetLoaderGGUF", widgets=[("unet_name", GGUF_NAME)])
+        vvae = node("VAELoader", widgets=[("vae_name", VVAE_NAME)])
+        avae = node("VAELoader", widgets=[("vae_name", AVAE_NAME)])
+
     pos = node("CLIPTextEncode", inputs={"clip": C(clip)}, widgets=[("text", prompt)])
     neg = node("CLIPTextEncode", inputs={"clip": C(clip)}, widgets=[("text", NEGATIVE)])
     cond = node("LTXVConditioning", inputs={"positive": C(pos), "negative": C(neg)},
                 widgets=[("frame_rate", float(FPS))])
-    unet = node("UnetLoaderGGUF", widgets=[("unet_name", GGUF_NAME)])
-    vvae = node("VAELoader", widgets=[("vae_name", VVAE_NAME)])
-    avae = node("VAELoader", widgets=[("vae_name", AVAE_NAME)])
 
     img_src = None
     if mode == "i2v":
@@ -422,9 +473,9 @@ def build_graph(mode: str, prompt: str, width: int, height: int, seed: int,
     # stage 1: base pass at W/2 x H/2 (single-stage fallback: full W x H)
     bw, bh = (width // 2, height // 2) if stage == "two" else (width, height)
     vlat = node("EmptyLTXVLatentVideo", widgets=[("width", bw), ("height", bh),
-                                                 ("length", FRAMES), ("batch_size", 1)])
+                                                 ("length", frames), ("batch_size", 1)])
     alat = node("LTXVEmptyLatentAudio", inputs={"audio_vae": C(avae)},
-                widgets=[("frames_number", FRAMES), ("frame_rate", FPS), ("batch_size", 1)])
+                widgets=[("frames_number", frames), ("frame_rate", FPS), ("batch_size", 1)])
     av = node("LTXVConcatAVLatent", inputs={"video_latent": C(vlat), "audio_latent": C(alat)})
 
     latent_in = C(av)
@@ -509,11 +560,12 @@ class Pinger:
         self._stop = True
 
 
-def comfy_progress() -> int:
-    """Parse the latest sampler % from ComfyUI's stdout log."""
+def comfy_progress(tag: str) -> int:
+    """Parse the latest sampler % from a lane's ComfyUI stdout log."""
     try:
-        with open(f"{BASE}/comfyui.log", "r", errors="ignore") as f:
-            f.seek(max(0, os.path.getsize(f"{BASE}/comfyui.log") - 40000))
+        p = f"{BASE}/comfyui_{tag}.log"
+        with open(p, "r", errors="ignore") as f:
+            f.seek(max(0, os.path.getsize(p) - 40000))
             tail = f.read()
         pcts = re.findall(r"\s(\d{1,3})%\|", tail)
         return int(pcts[-1]) if pcts else 0
@@ -525,27 +577,29 @@ def debug_trail(ex: Exchange, jid: str, phase: str, extra: str = "") -> None:
     """Best-effort phase + ComfyUI log tail into R2 so a thrashed box is
     debuggable from the outside."""
     try:
-        tail = ""
-        try:
-            sz = os.path.getsize(f"{BASE}/comfyui.log")
-            with open(f"{BASE}/comfyui.log", "r", errors="ignore") as f:
-                f.seek(max(0, sz - 2500))
-                tail = f.read()
-        except Exception:
-            pass
+        tails = []
+        for tag, (proc, _port) in COMFY_PROCS.items():
+            try:
+                sz = os.path.getsize(f"{BASE}/comfyui_{tag}.log")
+                with open(f"{BASE}/comfyui_{tag}.log", "r", errors="ignore") as f:
+                    f.seek(max(0, sz - 1500))
+                    tails.append(f"--- {tag} ---\n" + f.read())
+            except Exception:
+                pass
         ex.put_json(f"debug/{jid}.json", {
             "id": jid, "phase": phase, "extra": extra[:400],
-            "comfy_tail": tail[-2200:], "at": time.time(),
+            "comfy_tail": ("\n".join(tails))[-2200:], "at": time.time(),
         })
     except Exception:
         pass
 
 
-def run_workflow(gf, pinger: Pinger, ex: Exchange, jid: str, timeout_min: int = 90) -> str:
+def run_workflow(api: str, gf, pinger: Pinger, ex: Exchange, jid: str,
+                 tag: str, timeout_min: int = 90) -> str:
     """POST /prompt, poll /history until the SaveVideo output exists. Returns mp4 path."""
-    resp = api_post("/prompt", {"prompt": gf["prompt"]})
+    resp = api_post(api, "/prompt", {"prompt": gf["prompt"]})
     pid = resp["prompt_id"]
-    log(f"queued prompt {pid}")
+    log(f"[{tag}] queued prompt {pid}")
     deadline = time.time() + timeout_min * 60
     last_pct = -1
     while time.time() < deadline:
@@ -553,21 +607,21 @@ def run_workflow(gf, pinger: Pinger, ex: Exchange, jid: str, timeout_min: int = 
         # inline heartbeat: don't depend solely on the pinger thread
         try:
             ex.heartbeat(jid, "RENDERING", gpu=pinger.gpu,
-                         progress=max(pinger.progress, 15 + int(comfy_progress() * 0.75)),
+                         progress=max(pinger.progress, 15 + int(comfy_progress(tag) * 0.75)),
                          elapsed_s=time.time() - T0)
         except Exception:
             pass
         try:
-            with urllib.request.urlopen(f"{API}/history/{pid}", timeout=30) as r:
+            with urllib.request.urlopen(f"{api}/history/{pid}", timeout=30) as r:
                 hist = json.loads(r.read())
         except Exception:
             hist = {}
         entry = hist.get(pid)
-        p = comfy_progress()
+        p = comfy_progress(tag)
         if p != last_pct:
             last_pct = p
             pinger.set(15 + int(p * 0.75))
-            log(f"  sampler {p}%")
+            log(f"[{tag}] sampler {p}%")
         if entry:
             status = entry.get("status", {})
             if status.get("status_str") == "error":
@@ -589,8 +643,9 @@ def run_workflow(gf, pinger: Pinger, ex: Exchange, jid: str, timeout_min: int = 
                                     return p
                 raise RuntimeError("SaveVideo output present but no mp4 found")
         if time.time() % 60 < 8:
-            if COMFY_PROC.poll() is not None:
-                raise RuntimeError("ComfyUI process died mid-render")
+            proc, _ = COMFY_PROCS[tag]
+            if proc.poll() is not None:
+                raise RuntimeError(f"ComfyUI {tag} died mid-render")
     raise RuntimeError(f"render timed out after {timeout_min} min")
 
 
@@ -623,14 +678,23 @@ def make_thumb(video_path: str, thumb_path: str) -> None:
                    shell=True, check=True, executable="/bin/bash")
 
 
-def render_job(ex: Exchange, jid: str, spec: dict, gpu: str) -> None:
+def render_job(ex: Exchange, jid: str, spec: dict, lane: str) -> None:
+    """Render one claimed job on `lane` ('lane0' hosts both single-card and
+    split graphs; 'lane1' renders 5s single-card only)."""
     mode = spec.get("mode", "t2v")
     prompt = spec.get("prompt", "").strip()
     aspect = spec.get("aspect", "landscape")
+    duration_s = int(spec.get("duration_s", 5))
+    if duration_s not in DURATIONS:
+        duration_s = 5
+    split = duration_s == 15 and lane == "lane0"
     width, height = ASPECTS.get(aspect, ASPECTS["landscape"])
     seed = spec.get("seed")
     if seed is None:
         seed = int.from_bytes(os.urandom(4), "little") % 4294967295
+    gpu_label = f"t4:0+1/15s" if split else (f"t4:{'0' if lane == 'lane0' else '1'}/5s")
+
+    api = f"http://127.0.0.1:{COMFY_PROCS[lane][1]}"
 
     ref_file = ""
     if mode == "i2v":
@@ -651,23 +715,39 @@ def render_job(ex: Exchange, jid: str, spec: dict, gpu: str) -> None:
         im.save(f"{COMFY_DIR}/input/{ref_file}", quality=95)
         os.remove(raw_path)
 
-    log(f"rendering {jid[:10]} mode={mode} {width}x{height} seed={seed}")
-    pinger = Pinger(ex, jid, gpu)
+    log(f"[{lane}] rendering {jid[:10]} mode={mode} dur={duration_s}s {width}x{height} "
+        f"seed={seed} split={split}")
+    pinger = Pinger(ex, jid, gpu_label)
     t0 = time.time()
     try:
         debug_trail(ex, jid, "submitting")
-        gf = build_graph(mode, prompt, width, height, seed, ref_file, jid, stage="two")
+        gf = build_graph(mode, prompt, width, height, seed, ref_file, jid,
+                         stage="two", duration_s=duration_s, split=split)
+        stage_used = "two"
         try:
-            video = run_workflow(gf, pinger, ex, jid)
-            stage_used = "two"
+            video = run_workflow(api, gf, pinger, ex, jid, lane)
         except RuntimeError as e:
-            if "out of memory" not in str(e).lower():
+            low = str(e).lower()
+            if "out of memory" not in low:
                 raise
-            log(f"two-stage OOM → single-stage fallback ({str(e)[:120]})")
-            ex.heartbeat(jid, "RENDERING", gpu=gpu, progress=12, elapsed_s=time.time() - T0)
-            gf = build_graph(mode, prompt, width, height, seed, ref_file, jid, stage="one")
-            video = run_workflow(gf, pinger, ex, jid)
-            stage_used = "one"
+            # v7 fallback ladder: split two-stage OOM → single-stage full res;
+            # then (15s only) dropped resolution bucket, per the approved plan.
+            if split:
+                log(f"split two-stage OOM → dropped-bucket retry ({str(e)[:120]})")
+                ex.heartbeat(jid, "RENDERING", gpu=gpu_label, progress=12, elapsed_s=time.time() - T0)
+                ow, oh = OOM_ASPECTS.get(aspect, OOM_ASPECTS["landscape"])
+                gf = build_graph(mode, prompt, ow, oh, seed, ref_file, jid,
+                                 stage="two", duration_s=duration_s, split=split)
+                width, height = ow, oh
+                stage_used = "two@dropped"
+                video = run_workflow(api, gf, pinger, ex, jid, lane)
+            else:
+                log(f"two-stage OOM → single-stage fallback ({str(e)[:120]})")
+                ex.heartbeat(jid, "RENDERING", gpu=gpu_label, progress=12, elapsed_s=time.time() - T0)
+                gf = build_graph(mode, prompt, width, height, seed, ref_file, jid,
+                                 stage="one", duration_s=duration_s, split=False)
+                stage_used = "one"
+                video = run_workflow(api, gf, pinger, ex, jid, lane)
         # thumb MUST end in .jpg — ffmpeg picks the container from the output
         # extension, so a .mp4 thumb name produced mp4 bytes inside thumb.jpg
         # (v21 bug: every poster in the gallery was an undecodable "image")
@@ -680,14 +760,14 @@ def render_job(ex: Exchange, jid: str, spec: dict, gpu: str) -> None:
             thumb = ""
         debug_trail(ex, jid, "publishing")
         if thumb and os.path.exists(thumb):
-            ex.publish_result(jid, video, thumb, gpu, time.time() - t0)
+            ex.publish_result(jid, video, thumb, gpu_label, time.time() - t0)
         else:
             # video alone is the deliverable — never lose a rendered clip to a
             # poster-frame hiccup (v20 lost both smoke renders to a bad
             # thumb path that pointed into a nonexistent subdirectory)
             ex.put_file(f"{ex.prefix}/results/{jid}/video.mp4", video)
-            ex.heartbeat(jid, "DONE", gpu=gpu, progress=100, elapsed_s=time.time() - t0)
-        log(f"DONE {jid[:10]} in {int(time.time() - t0)} s (stage={stage_used})")
+            ex.heartbeat(jid, "DONE", gpu=gpu_label, progress=100, elapsed_s=time.time() - t0)
+        log(f"[{lane}] DONE {jid[:10]} in {int(time.time() - t0)} s (stage={stage_used}, dur={duration_s}s)")
     except Exception as e:
         debug_trail(ex, jid, "failed", str(e))
         raise
@@ -695,7 +775,7 @@ def render_job(ex: Exchange, jid: str, spec: dict, gpu: str) -> None:
         pinger.stop()
 
 
-# ────────────────────────── main loop ──────────────────────────
+# ────────────────────────── orchestrator main loop ──────────────────────────
 
 def main() -> None:
     install_deps()
@@ -703,10 +783,15 @@ def main() -> None:
     setup_swap()
     convert_te_fp8()
     probe_te_keys()
-    start_comfy()
+
+    ngpu = gpu_count()
+    log(f"GPUs detected: {ngpu}")
+    start_comfy_lane("lane0", 8188, "0,1" if ngpu > 1 else "0")
+    if ngpu > 1:
+        start_comfy_lane("lane1", 8189, "1")
 
     try:
-        oi = object_info()
+        oi = object_info("http://127.0.0.1:8188")
         missing = [c for c in ("UnetLoaderGGUF", "LTXVConditioning", "LTXVDualCFGGuider",
                                "LTXVConcatAVLatent", "LTXVSeparateAVLatent", "LTXVAudioVAEDecode",
                                "LTXVEmptyLatentAudio", "LTXVLatentUpsampler", "LTXVImgToVideoInplace",
@@ -715,6 +800,13 @@ def main() -> None:
                                "ResizeImageMaskNode") if c not in oi]
         if missing:
             raise SystemExit(f"node classes missing from ComfyUI: {missing}")
+        if ngpu > 1:
+            mgpu_missing = [c for c in ("UnetLoaderGGUFDisTorch2MultiGPU",
+                                        "CLIPLoaderDisTorch2MultiGPU",
+                                        "VAELoaderDisTorch2MultiGPU") if c not in oi]
+            if mgpu_missing:
+                raise SystemExit(f"DisTorch2 nodes missing: {mgpu_missing}")
+            log("DisTorch2 split capability verified")
         ggufs = oi.get("UnetLoaderGGUF", {}).get("input", {}).get("required", {}).get("unet_name")
         if ggufs and GGUF_NAME not in ggufs[0]:
             log(f"WARNING: {GGUF_NAME} not in UnetLoaderGGUF list: {ggufs[0][:5]}")
@@ -725,7 +817,6 @@ def main() -> None:
         log(f"node check skipped: {e}")
 
     ex = Exchange()
-    gpu = "t4:0"
     try:
         with open("/proc/meminfo") as f:
             for line in f:
@@ -734,11 +825,13 @@ def main() -> None:
                     break
     except Exception:
         pass
-    log("worker loop up — LTX-2.5 22B distilled UD-Q4_K_XL, two-stage pipeline")
+    log(f"worker loop up — LTX-2.5 22B distilled UD-Q4_K_XL, lanes={min(ngpu, 2)}, "
+        f"15s split={'on' if ngpu > 1 else 'off (single GPU)'}")
     MY_BOOT_TS = time.time()
     try:
         ex_boot = Exchange()
-        ex_boot.put_json("boot_marker.json", {"at": MY_BOOT_TS, "pid": os.getpid()})
+        ex_boot.put_json("boot_marker.json", {"at": MY_BOOT_TS, "pid": os.getpid(),
+                                              "lanes": min(ngpu, 2), "split15": ngpu > 1})
     except Exception:
         MY_BOOT_TS = 0
 
@@ -754,12 +847,63 @@ def main() -> None:
         except Exception:
             return False
 
+    # per-lane dispatch queues + worker threads (single claimer: this loop)
+    lanes = ["lane0"] + (["lane1"] if ngpu > 1 else [])
+    queues: dict = {ln: queue.Queue() for ln in lanes}
+    errors: queue.Queue = queue.Queue()
+    fifteen_lock = threading.Lock()  # 15s owns the whole box while rendering
+
+    def lane_worker(ln: str) -> None:
+        while True:
+            item = queues[ln].get()
+            if item is None:
+                return
+            jid, spec = item
+            try:
+                render_job(ex, jid, spec, ln)
+                errors.put(("ok", jid, ""))
+            except Exception as e:
+                msg = str(e)[:400]
+                oom = oom_evidence()
+                full = (msg + (" || " + oom if oom else ""))[:480]
+                log(f"FAILED {jid[:10]}: {full}")
+                try:
+                    ex.fail(jid, full, gpu=ln)
+                except Exception:
+                    pass
+                errors.put(("fail", jid, msg[:80]))
+            finally:
+                queues[ln].task_done()
+
+    threads = {ln: threading.Thread(target=lane_worker, args=(ln,), daemon=True)
+               for ln in lanes}
+    for t in threads.values():
+        t.start()
+
+    def lanes_idle() -> bool:
+        return all(q.empty() for q in queues.values())
+
     last_busy = time.time()
     fail_sig, fail_n = "", 0
     while time.time() - T0 < MAX_SESSION_MIN * 60:
         if superseded(ex):
             log("newer session announced itself — this worker stands down")
             return
+        # surface failed renders to the circuit breaker
+        while not errors.empty():
+            kind, jid, sig = errors.get_nowait()
+            if kind == "ok":
+                fail_sig, fail_n = "", 0
+                last_busy = time.time()
+            else:
+                fail_n = fail_n + 1 if sig == fail_sig else 1
+                fail_sig = sig
+                if fail_n >= 3:
+                    debug_trail(ex, jid, "circuit-break",
+                                f"3 consecutive same-signature failures: {sig}")
+                    log("circuit breaker: 3 consecutive same-signature failures "
+                        "— exiting instead of churning the queue")
+                    raise SystemExit(3)
         try:
             jobs = ex.pending_jobs()
         except Exception as e:
@@ -772,38 +916,41 @@ def main() -> None:
                 return
             time.sleep(15)
             continue
-        last_busy = time.time()
+        # 15s jobs own the box: dispatch only when every lane is idle
+        fifteen = next((j for j in jobs if int(j.get("duration_s", 5)) == 15), None)
+        if fifteen is not None:
+            if lanes_idle() and fifteen_lock.acquire(blocking=False):
+                try:
+                    if superseded(ex):
+                        log("newer session announced itself — not claiming the 15s job")
+                        break
+                    claimed = ex.claim(fifteen["id"], fifteen.get("_key", ""))
+                    last_busy = time.time()
+                    if claimed is not None:
+                        log(f"15s job {fifteen['id'][:10]} — claiming the whole box")
+                        queues["lane0"].put((fifteen["id"], claimed))
+                        queues["lane0"].join()   # box is single-purpose until done
+                finally:
+                    fifteen_lock.release()
+                continue
+            time.sleep(15)
+            continue
+        # regular 5s jobs → any lane with an empty queue (round-robin-ish)
         for spec in jobs:
             if superseded(ex):
                 log("newer session announced itself — not claiming further jobs")
                 return
-            jid = spec.get("id", "")
-            key = spec.get("_key", "")
-            claimed = ex.claim(jid, key)
+            if int(spec.get("duration_s", 5)) != 5:
+                continue  # handled by the 15s branch on a later pass
+            free = next((ln for ln in lanes if queues[ln].empty()), None)
+            if free is None:
+                break
+            claimed = ex.claim(spec["id"], spec.get("_key", ""))
             if claimed is None:
                 continue
-            try:
-                render_job(ex, jid, claimed, gpu)
-                fail_sig, fail_n = "", 0
-            except Exception as e:
-                msg = str(e)[:400]
-                oom = oom_evidence()
-                full = (msg + (" || " + oom if oom else ""))[:480]
-                log(f"FAILED {jid[:10]}: {full}")
-                try:
-                    ex.fail(jid, full, gpu=gpu)
-                except Exception:
-                    pass
-                sig = msg[:80]
-                fail_n = fail_n + 1 if sig == fail_sig else 1
-                fail_sig = sig
-                if fail_n >= 3:
-                    debug_trail(ex, jid, "circuit-break",
-                                f"3 consecutive same-signature failures: {sig}")
-                    log("circuit breaker: 3 consecutive same-signature failures "
-                        "— exiting instead of churning the queue")
-                    raise SystemExit(3)
             last_busy = time.time()
+            log(f"dispatching {spec['id'][:10]} → {free}")
+            queues[free].put((spec["id"], claimed))
 
     log("session cap reached — exiting")
 

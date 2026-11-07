@@ -350,6 +350,13 @@
         </div>
       </div>
       <div class="opt">
+        <div class="optlbl">DURATION</div>
+        <div class="seg sm" id="durationseg">
+          <button data-dur="5" class="on">5 s</button>
+          <button data-dur="15">15 s</button>
+        </div>
+      </div>
+      <div class="opt">
         <div class="optlbl">AUDIO</div>
         <div class="audio-switch on" id="audiosw" role="switch" aria-checked="true" tabindex="0">
           <span class="sw"></span>
@@ -407,6 +414,7 @@ const PREFIX = "vidgen";
 /* ───────────── state ───────────── */
 let mode = localStorage.getItem("vg.mode") || "t2v";
 let aspect = localStorage.getItem("vg.aspect") || "landscape";
+let duration = localStorage.getItem("vg.dur") || "5";
 let audio = localStorage.getItem("vg.audio") !== "0";
 let refData = null;           // {b64, mime, name, w, h, bytes}
 let unlocked = false;
@@ -531,6 +539,18 @@ $("#aspectseg").addEventListener("click", (e) => {
 });
 [...$("#aspectseg").children].forEach((x) => x.classList.toggle("on", x.dataset.aspect === aspect));
 
+$("#durationseg").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  duration = b.dataset.dur;
+  localStorage.setItem("vg.dur", duration);
+  [...$("#durationseg").children].forEach((x) => x.classList.toggle("on", x === b));
+  const ec = document.querySelector(".engine-chip");
+  if (ec) ec.textContent = duration === "15"
+    ? "≈ 25–40 min · 15 s · 24 fps · both cards"
+    : "≈ 8–13 min · 5 s · 24 fps";
+});
+[...$("#durationseg").children].forEach((x) => x.classList.toggle("on", x.dataset.dur === duration));
+
 const audiosw = $("#audiosw");
 function setAudio(on) {
   audio = on;
@@ -602,7 +622,7 @@ async function submit() {
   const btn = $("#go");
   btn.disabled = true; btn.lastChild.textContent = "Submitting…";
   try {
-    const body = { mode, prompt, aspect, audio };
+    const body = { mode, prompt, aspect, audio, duration_s: Number(duration) };
     const seed = $("#seed").value.trim();
     if (seed !== "") body.seed = Number(seed);
     if (mode === "i2v") body.ref_b64 = "data:image/jpeg;base64," + refData.b64;
@@ -806,6 +826,7 @@ function openTheater(j) {
   $("#thchips").innerHTML = [
     (j.mode || "t2v").toUpperCase(),
     j.aspect === "portrait" ? "9:16" : "16:9",
+    j.duration_s === 15 ? "15 s" : "5 s",
     j.elapsed_s ? "render " + fmtElapsed(j.elapsed_s) : "",
     j.id.slice(0, 8),
     ago(j.updated_at),
