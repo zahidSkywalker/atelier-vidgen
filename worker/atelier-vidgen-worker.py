@@ -22,7 +22,7 @@ Policy : ONE renderer process / card 0. The gemma-12B text encoder (fp16
          once single-stage at full resolution.
 Quota  : exits when the queue stays empty for IDLE_EXIT_MIN minutes; hard
          stop at MAX_SESSION_MIN minutes. Heartbeats every 60 s.
-Creds  : dataset xion678/vidgen-config → vidgen_runtime.env (+ vidgen_exchange.py).
+Creds  : dataset jahidul007/vidgen-config → vidgen_runtime.env (+ vidgen_exchange.py).
 """
 import json
 import os
@@ -37,7 +37,7 @@ import urllib.error
 # ────────────────────────── config & exchange ──────────────────────────
 
 CONFIG_DIR_CANDIDATES = [
-    "/kaggle/input/datasets/xion678/vidgen-config",
+    "/kaggle/input/datasets/jahidul007/vidgen-config",
     "/kaggle/input/vidgen-config",
     os.path.expanduser("~/.vidgen"),
     ".",
@@ -49,7 +49,7 @@ def find_config_file() -> str:
         p = os.path.join(d, "vidgen_runtime.env")
         if os.path.exists(p):
             return p
-    raise SystemExit("vidgen_runtime.env not found (dataset xion678/vidgen-config attached?)")
+    raise SystemExit("vidgen_runtime.env not found (dataset jahidul007/vidgen-config attached?)")
 
 
 CFG_PATH = find_config_file()
@@ -74,7 +74,7 @@ sys.path.insert(0, CONFIG_DIR_CANDIDATES[0])
 try:
     from vidgen_exchange import Exchange
 except ImportError:
-    raise SystemExit("vidgen_exchange.py not found — bundle it into xion678/vidgen-config")
+    raise SystemExit("vidgen_exchange.py not found — bundle it into jahidul007/vidgen-config")
 
 T0 = time.time()
 API = "http://127.0.0.1:8188"

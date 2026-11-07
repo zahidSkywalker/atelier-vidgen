@@ -1,5 +1,5 @@
 {
-  "id": "xion678/atelier-vidgen-worker",
+  "id": "jahidul007/atelier-vidgen-worker",
   "title": "Atelier VidGen Worker",
   "code_file": "atelier-vidgen-worker.py",
   "language": "python",
@@ -8,7 +8,9 @@
   "enable_gpu": true,
   "enable_tpu": false,
   "enable_internet": true,
-  "dataset_sources": ["xion678/vidgen-config"],
+  "dataset_sources": [
+    "jahidul007/vidgen-config"
+  ],
   "kernel_sources": [],
   "model_sources": []
 }
